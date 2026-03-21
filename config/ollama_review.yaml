@@ -1,0 +1,36 @@
+# ollama_review.yaml
+# 本地 Ollama 多模态大模型图表复评配置（相对路径基于项目根目录）
+
+# 候选列表 JSON
+candidates: data/candidates/candidates_latest.json
+
+# 候选图表目录（其下按 pick_date 分目录）
+kline_dir: data/kline
+
+# 评分结果输出目录
+output_dir: data/review
+
+# 提示词文件
+prompt_path: agent/prompt.md
+
+# Ollama 服务地址（默认本机）
+ollama_base_url: http://localhost:11434/v1
+
+# 本地模型名称（需提前 ollama pull）
+# 推荐选项：
+#   qwen2.5vl:7b   — 中文最强，~6GB 显存
+#   qwen2.5vl:72b  — 精度更高，~40GB 显存
+#   llava:13b      — 备选，~8GB 显存
+model: qwen3-vl:8b
+
+# 生成温度（0.0~1.0，越低越稳定）
+temperature: 0.2
+
+# 相邻 API 调用间隔（秒，本地模型可设小一点）
+request_delay: 2
+
+# true: 跳过已存在单股 JSON（断点续跑）
+skip_existing: false
+
+# 推荐最小分数门槛
+suggest_min_score: 4.0
