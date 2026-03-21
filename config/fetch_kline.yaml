@@ -2,9 +2,8 @@
 # fetch_kline.py 配置文件
 # ============================================================
 
-# 抓取日期范围（YYYYMMDD 或 'today'）
-start: "20190101"
-end: "today"
+# 抓取最近几年的数据（默认6年，2019年至今）
+years: 6
 
 # 股票清单 CSV 路径（需含 ts_code 与 symbol 列）
 stocklist: "./pipeline/stocklist.csv"

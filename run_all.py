@@ -6,7 +6,7 @@ run_all.py
   步骤 1  pipeline/fetch_kline.py   — 拉取最新 K 线数据
   步骤 2  pipeline/cli.py preselect — 量化初选，生成候选列表
   步骤 3  dashboard/export_kline_charts.py — 导出候选股 K 线图
-  步骤 4  agent/qwen_review.py    — Doubao 图表分析评分
+  步骤 4  agent/doubao_review.py    — Doubao 图表分析评分
   步骤 5  打印推荐购买的股票
 
 用法：
@@ -130,8 +130,8 @@ def main() -> None:
     # ── 步骤 4：Doubao 图表分析 ────────────────────────────────────────
     if start <= 4:
         _run(
-            "4/4  Doubao 图表分析（qwen_review）",
-            [PYTHON, str(ROOT / "agent" / "qwen_review.py")],
+            "4/4  Doubao 图表分析（doubao_review）",
+            [PYTHON, str(ROOT / "agent" / "doubao_review.py")],
         )
 
     # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────

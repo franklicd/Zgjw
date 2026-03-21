@@ -9,15 +9,11 @@ import warnings
 from pathlib import Path
 from typing import List, Optional
 import os
-import json
 
+import baostock as bs
 import pandas as pd
 import yaml
 from tqdm import tqdm
-
-# 导入新的数据抓取模块
-from pipeline.akshare_fetcher import AKShareFetcher
-from pipeline.csv_manager import CSVManager
 
 warnings.filterwarnings("ignore")
 
@@ -74,42 +70,64 @@ def _cool_sleep(base_seconds: int) -> None:
     logger.warning("疑似被限流/封禁，进入冷却期 %d 秒...", sleep_s)
     time.sleep(sleep_s)
 
-# --------------------------- 历史K线（AKShare + 腾讯接口，前复权） --------------------------- #
+# --------------------------- 历史K线（Baostock 日线，前复权） --------------------------- #
 
-def _get_kline_akshare(code: str, years: int = 6) -> pd.DataFrame:
+def _to_bs_code(code: str) -> str:
+    """把6位code映射到baostock代码格式。"""
+    code = str(code).zfill(6)
+    if code.startswith(("60", "68", "9")):
+        return f"sh.{code}"
+    elif code.startswith(("4", "8")):
+        return f"bj.{code}"
+    else:
+        return f"sz.{code}"
+
+def _get_kline_baostock(code: str, start: str, end: str) -> pd.DataFrame:
     """
-    通过 AKShare + 腾讯接口获取 A 股日线前复权数据。
-    :param code: 6位股票代码
-    :param years: 获取最近几年的数据，默认6年
+    通过 Baostock 获取 A 股日线前复权数据。
+    start/end 格式：YYYYMMDD，内部转为 YYYY-MM-DD。
     """
+    bs_code = _to_bs_code(code)
+    # 转换日期格式 YYYYMMDD -> YYYY-MM-DD
+    start_date = f"{start[:4]}-{start[4:6]}-{start[6:8]}"
+    end_date = f"{end[:4]}-{end[4:6]}-{end[6:8]}"
+
     try:
-        # 初始化fetcher（单例模式，避免重复初始化）
-        if not hasattr(_get_kline_akshare, "_fetcher"):
-            _get_kline_akshare._fetcher = AKShareFetcher(data_dir=str(_PROJECT_ROOT / "data"))
-        
-        df = _get_kline_akshare._fetcher.fetch_stock_history(code, years=years)
-        
-        if df is None or df.empty:
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume",
+            start_date=start_date,
+            end_date=end_date,
+            frequency="d",
+            adjustflag="1"  # 1=前复权
+        )
+        if rs.error_code != '0':
+            logger.warning(f"{code} 获取数据失败: {rs.error_msg}")
             return pd.DataFrame()
-        
-        # 统一字段格式，和原有系统兼容
-        df = df.rename(columns={
-            "date": "date",
-            "open": "open",
-            "close": "close",
-            "high": "high",
-            "low": "low",
-            "volume": "volume",
-        })[["date", "open", "close", "high", "low", "volume"]].copy()
-        
-        # 按日期正序排列（和原有baostock返回格式一致）
-        df = df.sort_values("date").reset_index(drop=True)
-        
-        return df
+        data_list = []
+        while (rs.error_code == '0') & rs.next():
+            data_list.append(rs.get_row_data())
+        df = pd.DataFrame(data_list, columns=rs.fields)
     except Exception as e:
         if _looks_like_ip_ban(e):
             raise RateLimitError(str(e)) from e
         raise
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.rename(columns={
+        "date": "date",
+        "open": "open",
+        "close": "close",
+        "high": "high",
+        "low": "low",
+        "volume": "volume",
+    })[["date", "open", "close", "high", "low", "volume"]].copy()
+    df["date"] = pd.to_datetime(df["date"])
+    for c in ["open", "close", "high", "low", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.sort_values("date").reset_index(drop=True)
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -150,7 +168,8 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str]) -> 
 # --------------------------- 单只抓取（全量覆盖保存） --------------------------- #
 def fetch_one(
     code: str,
-    years: int,
+    start: str,
+    end: str,
     out_dir: Path,
 ) -> bool:
     """抓取单只股票并保存。返回 True 表示成功，False 表示三次均失败。"""
@@ -158,13 +177,13 @@ def fetch_one(
 
     for attempt in range(1, 4):
         try:
-            new_df = _get_kline_akshare(code, years=years)
+            new_df = _get_kline_baostock(code, start, end)
             if new_df.empty:
                 logger.debug("%s 无数据，生成空表。", code)
                 new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
             new_df = validate(new_df)
             new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
-            time.sleep(random.uniform(0.1, 0.3))  # 降低并发压力（AKShare接口比baostock快，限速更低）
+            time.sleep(random.uniform(0.3, 0.6))  # 降低并发压力
             return True
         except Exception as e:
             if _looks_like_ip_ban(e):
@@ -204,12 +223,19 @@ def main(log_path: Optional[Path] = None):
     setup_logging(log_path)
     logger.info("日志文件：%s", Path(log_path).resolve())
 
+    # ---------- Baostock 登录 ---------- #
+    logger.info("正在登录 Baostock...")
+    lg = bs.login()
+    if lg.error_code != '0':
+        logger.error(f"Baostock 登录失败: {lg.error_msg}")
+        sys.exit(1)
+    logger.info("Baostock 登录成功")
+
     # ---------- 日期解析 ---------- #
-    raw_years = cfg.get("years", 6)
-    try:
-        years = int(raw_years)
-    except:
-        years = 6
+    raw_start = str(cfg.get("start", "20190101"))
+    raw_end   = str(cfg.get("end",   "today"))
+    start = dt.date.today().strftime("%Y%m%d") if raw_start.lower() == "today" else raw_start
+    end   = dt.date.today().strftime("%Y%m%d") if raw_end.lower()   == "today" else raw_end
 
     out_dir = _resolve_cfg_path(cfg.get("out", "./data"))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,11 +247,12 @@ def main(log_path: Optional[Path] = None):
 
     if not codes:
         logger.error("stocklist 为空或被过滤后无代码，请检查。")
+        bs.logout()
         sys.exit(1)
 
     logger.info(
-        "开始抓取 %d 支股票 | 数据源:AKShare+腾讯接口(日线,qfq) | 最近:%d年 | 排除:%s",
-        len(codes), years, ",".join(sorted(exclude_boards)) or "无",
+        "开始抓取 %d 支股票 | 数据源:Baostock(日线,qfq) | 日期:%s → %s | 排除:%s",
+        len(codes), start, end, ",".join(sorted(exclude_boards)) or "无",
     )
 
     # ---------- 单线程抓取（全量覆盖） ---------- #
@@ -238,13 +265,17 @@ def main(log_path: Optional[Path] = None):
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
     ) as pbar:
         for code in codes:
-            success = fetch_one(code, years, out_dir)
+            success = fetch_one(code, start, end, out_dir)
             if success:
                 ok_count += 1
             else:
                 fail_count += 1
             pbar.set_postfix(成功=ok_count, 失败=fail_count)
             pbar.update(1)
+
+    # ---------- Baostock 登出 ---------- #
+    bs.logout()
+    logger.info("Baostock 已登出")
 
     logger.info("全部任务完成：成功 %d 支，失败 %d 支，数据已保存至 %s",
                 ok_count, fail_count, out_dir.resolve())
