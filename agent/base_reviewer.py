@@ -111,6 +111,11 @@ class BaseReviewer:
             )
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
+
+            # 在每个线程中加入请求间隔，而不是在主线程中
+            request_delay = self.config.get("request_delay", 1)
+            time.sleep(request_delay)  # 每个请求后休眠，控制API调用频率
+
             return result, None
         except Exception as e:
             print(f"[❌] {code} — 分析失败：{e}")
@@ -169,10 +174,6 @@ class BaseReviewer:
                         print(f"[✅] [{completed}/{len(to_process)}] {result['code']} — 完成 | verdict={verdict}, score={score}")
                     if failed_code:
                         failed_codes.append(failed_code)
-                    
-                    # 请求间隔，避免触发API限流
-                    if completed < len(to_process):
-                        time.sleep(request_delay)
 
         print(f"\n[INFO] 评分完成：成功 {len(all_results)} 支，失败/跳过 {len(failed_codes)} 支")
         if failed_codes:
