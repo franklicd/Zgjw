@@ -29,7 +29,10 @@ from typing import Any
 from openai import OpenAI
 import yaml
 
-from base_reviewer import BaseReviewer
+try:
+    from .base_reviewer import BaseReviewer
+except ImportError:
+    from base_reviewer import BaseReviewer
 
 # ────────────────────────────────────────────────
 # 配置加载

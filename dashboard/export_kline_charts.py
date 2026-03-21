@@ -14,9 +14,13 @@ AgentTrader · 批量导出候选股票 K线图（日线 + 周线）
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 import pandas as pd
 
@@ -72,6 +76,36 @@ def _export_fig(fig, out_path: Path, width: int, height: int) -> None:
     )
 
 
+def _process_single_stock(args: Tuple[str, Path, Path, dict]) -> Tuple[str, bool, str]:
+    """
+    处理单只股票的图表生成任务
+
+    Args:
+        args: (code, raw_dir, out_root, config)
+
+    Returns:
+        (code, success, message)
+    """
+    code, raw_dir, out_root, config = args
+
+    df_raw = _load_raw(code, raw_dir)
+    if df_raw.empty:
+        return code, False, "无日线数据"
+
+    # ── 日线图 ────────────────────────────────────────────────────
+    day_path = out_root / f"{code}_day.jpg"
+    try:
+        fig_day = make_daily_chart(
+            df_raw, code,
+            bars=config["bars"],
+            height=config["day_height"],
+        )
+        _export_fig(fig_day, day_path, config["day_width"], config["day_height"])
+        return code, True, f"→ {day_path.name}"
+    except Exception as e:
+        return code, False, f"日线导出失败：{e}"
+
+
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
 # 配置字典（直接修改此处）
@@ -85,14 +119,34 @@ CONFIG = {
     "day_height": 700,
     "week_width": 1400,
     "week_height": 700,
+    "max_workers": 4,    # 并发线程数
 }
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="批量导出候选股票K线图")
+    parser.add_argument('--date', type=str, help='指定导出日期 (YYYY-MM-DD)，默认从candidates文件读取')
+    parser.add_argument('--bars', type=int, help='日线显示K线数量（0 = 全部）')
+    parser.add_argument('--weekly-bars', type=int, dest='weekly_bars', help='周线显示K线数量（0 = 全部）')
+    parser.add_argument('--workers', type=int, help='并发线程数')
+    parser.add_argument('--config', type=str, help='配置文件路径')
+
+    args = parser.parse_args()
+
     candidates_path = Path(CONFIG["candidates"])
     raw_dir         = Path(CONFIG["raw_dir"])
 
     codes, pick_date = _load_candidates(candidates_path)
+
+    # 使用命令行参数覆盖默认配置
+    if args.date:
+        pick_date = args.date
+    if args.bars is not None:
+        CONFIG["bars"] = args.bars
+    if args.weekly_bars is not None:
+        CONFIG["weekly_bars"] = args.weekly_bars
+    if args.workers is not None:
+        CONFIG["max_workers"] = args.workers
 
     # 导出日期直接读取 candidates.json 的 pick_date
     export_date = pick_date
@@ -106,45 +160,24 @@ def main() -> None:
     ok_count    = 0
     skip_count  = 0
 
-    for code in codes:
-        df_raw = _load_raw(code, raw_dir)
-        if df_raw.empty:
-            print(f"[SKIP] {code}  — 无日线数据")
-            skip_count += 1
-            continue
+    # 准备任务参数
+    tasks = [(code, raw_dir, out_root, CONFIG) for code in codes]
 
-        # ── 日线图 ────────────────────────────────────────────────────
-        day_path = out_root / f"{code}_day.jpg"
-        try:
-            fig_day = make_daily_chart(
-                df_raw, code,
-                bars=CONFIG["bars"],
-                height=CONFIG["day_height"],
-            )
-            _export_fig(fig_day, day_path, CONFIG["day_width"], CONFIG["day_height"])
-        except Exception as e:
-            print(f"[ERROR] {code} 日线导出失败：{e}")
-            skip_count += 1
-            continue
+    # 使用线程池并行处理
+    with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
+        # 提交所有任务
+        future_to_code = {executor.submit(_process_single_stock, task): task[0] for task in tasks}
 
-        # ── 周线图 ────────────────────────────────────────────────────
-        # week_path = out_root / f"{code}_week.jpg"
-        # try:
-        #     fig_week = make_weekly_chart(
-        #         df_raw, code,
-        #         bars=CONFIG["weekly_bars"],
-        #         height=CONFIG["week_height"],
-        #     )
-        #     _export_fig(fig_week, week_path, CONFIG["week_width"], CONFIG["week_height"])
-        # except Exception as e:
-        #     print(f"[ERROR] {code} 周线导出失败：{e}")
-        #     # 日线已成功，继续计数
-        #     print(f"[OK]   {code}  日线 ✓  周线 ✗")
-        #     ok_count += 1
-        #     continue
+        # 使用tqdm显示进度
+        for future in tqdm(as_completed(future_to_code), total=len(tasks), desc="导出K线图", ncols=80):
+            code, success, message = future.result()
 
-        print(f"[OK]   {code}  → {day_path.name}")
-        ok_count += 1
+            if success:
+                print(f"[OK]   {code}  {message}")
+                ok_count += 1
+            else:
+                print(f"[SKIP] {code}  — {message}")
+                skip_count += 1
 
     print(
         f"\n导出完成：成功 {ok_count} 只，跳过 {skip_count} 只。"
