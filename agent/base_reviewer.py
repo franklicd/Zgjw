@@ -1,11 +1,11 @@
 """
 base_reviewer.py
 ~~~~~~~~~~~~~~~~
-提供 LLM 图表分析的基础架构（支持多线程并发）：
+提供 LLM 图表分析的基础架构（单线程顺序调用）：
 - 加载配置和 prompt
 - 读取候选股票列表
 - 查找本地 K 线图
-- 多线程并发调用子类实现的单股评分模型
+- 单线程顺序调用子类实现的单股评分模型
 - 结果汇总和输出
 """
 
@@ -14,8 +14,6 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import partial
 
 
 class BaseReviewer:
@@ -84,7 +82,7 @@ class BaseReviewer:
         }
 
     def _process_single_stock(self, candidate: dict, pick_date: str, out_dir: Path) -> tuple[Optional[dict], Optional[str]]:
-        """处理单只股票的分析，供多线程调用"""
+        """处理单只股票的分析，单线程顺序调用"""
         code: str = candidate["code"]
         out_file = out_dir / f"{code}.json"
 
@@ -130,11 +128,9 @@ class BaseReviewer:
         all_results: List[dict] = []
         failed_codes: List[str] = []
 
-        # 并发数配置，默认5并发，可在config中通过max_workers调整
-        max_workers = self.config.get("max_workers", 10)
-        print(f"[INFO] 多线程模式已启用，并发数={max_workers}")
 
         # 先处理已经存在的缓存文件
+        cached_count = 0
         for candidate in candidates:
             code = candidate["code"]
             out_file = out_dir / f"{code}.json"
@@ -143,33 +139,27 @@ class BaseReviewer:
                     with open(out_file, encoding="utf-8") as f:
                         result = json.load(f)
                     all_results.append(result)
+                    cached_count += 1
                     print(f"[✅] {code} — 已缓存，跳过")
                 except:
                     pass
 
         # 过滤出需要处理的股票
         to_process = [c for c in candidates if not (self.config.get("skip_existing", False) and (out_dir / f"{c['code']}.json").exists())]
-        print(f"[INFO] 待分析股票数：{len(to_process)}")
+        print(f"[INFO] 待分析股票数：{len(to_process)} (已缓存 {cached_count} 支)")
 
         if to_process:
-            # 多线程处理
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 绑定固定参数
-                process_func = partial(self._process_single_stock, pick_date=pick_date, out_dir=out_dir)
-                futures = [executor.submit(process_func, c) for c in to_process]
-
-                # 处理结果
-                completed = 0
-                for future in as_completed(futures):
-                    completed += 1
-                    result, failed_code = future.result()
-                    if result:
-                        all_results.append(result)
-                        verdict = result.get("verdict", "?")
-                        score = result.get("total_score", "?")
-                        print(f"[✅] [{completed}/{len(to_process)}] {result['code']} — 完成 | verdict={verdict}, score={score}")
-                    if failed_code:
-                        failed_codes.append(failed_code)
+            # 单线程顺序处理，避免 API 限流
+            print("[INFO] 单线程模式已启用，顺序调用 AI API")
+            for i, candidate in enumerate(to_process, 1):
+                result, failed_code = self._process_single_stock(candidate, pick_date, out_dir)
+                if result:
+                    all_results.append(result)
+                    verdict = result.get("verdict", "?")
+                    score = result.get("total_score", "?")
+                    print(f"[✅] [{i}/{len(to_process)}] {result['code']} — 完成 | verdict={verdict}, score={score}")
+                if failed_code:
+                    failed_codes.append(failed_code)
 
         print(f"\n[INFO] 评分完成：成功 {len(all_results)} 支，失败/跳过 {len(failed_codes)} 支")
         if failed_codes:

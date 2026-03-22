@@ -20,9 +20,18 @@ import numpy as np
 import pandas as pd
 import yaml 
 
-from schemas import Candidate
-from Selector import B1Selector, BrickChartSelector
-from pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
+try:
+    from .schemas import Candidate
+except ImportError:
+    from schemas import Candidate
+try:
+    from .Selector import B1Selector, BrickChartSelector
+except ImportError:
+    from Selector import B1Selector, BrickChartSelector
+try:
+    from .pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
+except ImportError:
+    from pipeline_core import MarketDataPreparer, TopTurnoverPoolBuilder
 
 logger = logging.getLogger(__name__)
 

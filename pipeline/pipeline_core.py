@@ -22,7 +22,10 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from Selector import AnySelector
+try:
+    from .Selector import AnySelector
+except ImportError:
+    from Selector import AnySelector
 
 
 # =============================================================================

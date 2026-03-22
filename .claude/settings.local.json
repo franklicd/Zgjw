@@ -8,7 +8,14 @@
       "Bash(source /Users/ghostwhisper/claudeWorkspace/Zgjw/.venv/bin/activate)",
       "Bash(source .venv/bin/activate)",
       "Bash(curl:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(source ./.venv/bin/activate)",
+      "Bash(python -c \":*)",
+      "Bash(sed -i '' 's/max_workers = self.config.get\\(\"\"max_workers\"\", 5\\)/max_workers = self.config.get\\(\"\"max_workers\"\", 10\\)/' /Users/ghostwhisper/claudeWorkspace/Zgjw/agent/base_reviewer.py)",
+      "Bash(sed -i '' 's/请求间隔=.*秒\"\"/并发数={max_workers}\"\"/' /Users/ghostwhisper/claudeWorkspace/Zgjw/agent/base_reviewer.py)",
+      "Bash(sed -i '' '/request_delay = self.config.get/d' /Users/ghostwhisper/claudeWorkspace/Zgjw/agent/base_reviewer.py)"
     ]
   }
 }

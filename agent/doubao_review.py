@@ -78,7 +78,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     return cfg
 
 
-class QwenReviewer(BaseReviewer):
+class DoubaoReviewer(BaseReviewer):
     def __init__(self, config):
         super().__init__(config)
 
