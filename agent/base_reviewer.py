@@ -112,9 +112,6 @@ class BaseReviewer:
             with open(out_file, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
 
-            # 在每个线程中加入请求间隔，而不是在主线程中
-            request_delay = self.config.get("request_delay", 1)
-            time.sleep(request_delay)  # 每个请求后休眠，控制API调用频率
 
             return result, None
         except Exception as e:
@@ -134,9 +131,8 @@ class BaseReviewer:
         failed_codes: List[str] = []
 
         # 并发数配置，默认5并发，可在config中通过max_workers调整
-        max_workers = self.config.get("max_workers", 5)
-        request_delay = self.config.get("request_delay", 1)  # 单线程版本的delay是5，多线程版本降低到1，避免等待过久
-        print(f"[INFO] 多线程模式已启用，并发数={max_workers}，请求间隔={request_delay}秒")
+        max_workers = self.config.get("max_workers", 10)
+        print(f"[INFO] 多线程模式已启用，并发数={max_workers}")
 
         # 先处理已经存在的缓存文件
         for candidate in candidates:

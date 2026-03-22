@@ -9,7 +9,7 @@ qwen_review.py
 配置：
     默认读取 config/qwen_review.yaml。
 环境变量：
-    QWEN_API_KEY  —— 通义千问 API Key（必填）
+    DASHSCOPE_API_KEY  —— 阿里云 DashScope API Key（必填）
 输出：
     ./data/review/{pick_date}/{code}.json   每支股票的评分 JSON
     ./data/review/{pick_date}/suggestion.json  汇总推荐建议
@@ -44,7 +44,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "output_dir": "data/review",
     "prompt_path": "agent/prompt.md",
     # Qwen 模型参数
-    "model": "qwen-3.5-plus",
+    "model": "qwen3.5-plus",
     "request_delay": 1,  # 多线程版本请求间隔降低到1秒
     "max_workers": 5,    # 最大并发数，根据API限流调整，默认5并发
     "skip_existing": False,
@@ -79,9 +79,9 @@ class QwenReviewer(BaseReviewer):
     def __init__(self, config):
         super().__init__(config)
 
-        api_key = os.environ.get("QWEN_API_KEY", "")
+        api_key = os.environ.get("DASHSCOPE_API_KEY", "")
         if not api_key:
-            print("[ERROR] 未找到环境变量 QWEN_API_KEY，请先设置后重试。", file=sys.stderr)
+            print("[ERROR] 未找到环境变量 DASHSCOPE_API_KEY，请先设置后重试。", file=sys.stderr)
             sys.exit(1)
 
         # 使用阿里云百炼平台的API接口

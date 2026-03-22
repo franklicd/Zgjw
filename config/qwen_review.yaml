@@ -14,10 +14,10 @@ output_dir: data/review
 prompt_path: agent/prompt.md
 
 # Qwen 模型名称（需支持视觉输入）
-model: qwen-3.5-plus
+model: qwen3.5-plus
 
 # 相邻 API 调用间隔（秒）
-request_delay: 1
+request_delay: 0
 
 # true: 跳过已存在单股 JSON（断点续跑）
 skip_existing: false
@@ -26,4 +26,4 @@ skip_existing: false
 suggest_min_score: 4.0
 
 # 最大并发数
-max_workers: 5
+max_workers: 10
