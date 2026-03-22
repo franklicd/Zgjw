@@ -5,7 +5,7 @@
 - 使用 AKShare 拉取股票日线数据
 - 用量化规则做初选（B1 策略 + 砖型图策略）
 - 导出候选股票 K 线图
-- 调用 Doubao 对图表进行 AI 视觉复评打分
+- 调用 Qwen 对图表进行 AI 视觉复评打分
 
 > 详细流程说明见 [FLOW.md](FLOW.md)
 
@@ -17,7 +17,7 @@
 - 新加入了AI看图打分精选功能（是的，不用再自己看图了）
 - 已支持 B1 选股 + 砖型图选股
 - 数据源从 Tushare 迁移至 AKShare（无需 token）
-- AI 复评从 Gemini 迁移至豆包 Doubao
+- AI 复评从 Gemini 迁移至通义千问 Qwen
 
 ---
 
@@ -28,7 +28,7 @@
 1. 下载 K 线数据（pipeline.fetch_kline）
 2. 量化初选（pipeline.cli preselect）
 3. 导出候选图表（dashboard/export_kline_charts.py）
-4. Doubao 复评（agent/doubao_review.py）
+4. Qwen 复评（agent/qwen_review.py）
 5. 打印推荐结果（读取 suggestion.json）
 
 输出主链路：
@@ -44,8 +44,8 @@
 
 - [pipeline](pipeline)：数据抓取与量化初选
 - [dashboard](dashboard)：看盘界面与图表导出
-- [agent](agent)：LLM 评审逻辑（Doubao）
-- [config](config)：抓取、初选、Doubao 复评配置
+- [agent](agent)：LLM 评审逻辑（Qwen）
+- [config](config)：抓取、初选、Qwen 复评配置
 - [data](data)：运行数据与结果
 - [run_all.py](run_all.py)：全流程一键入口
 
@@ -71,16 +71,16 @@ pip install -r requirements.txt
 Windows PowerShell（永久写入）：
 
 ~~~powershell
-[Environment]::SetEnvironmentVariable("DOUBAO_API_KEY", "你的DoubaoApiKey", "User")
+[Environment]::SetEnvironmentVariable("QWEN_API_KEY", "你的QwenApiKey", "User")
 ~~~
 
 macOS / Linux：
 
 ~~~bash
-export DOUBAO_API_KEY="你的DoubaoApiKey"
+export QWEN_API_KEY="你的QwenApiKey"
 ~~~
 
-写入后请重开终端，环境变量才会在新会话中生效。Doubao API Key 在字节跳动开发者平台获取。
+写入后请重开终端，环境变量才会在新会话中生效。Qwen API Key 在阿里云百炼平台获取。
 
 ### 3.4 运行一键脚本
 
@@ -143,19 +143,19 @@ python dashboard/export_kline_charts.py
 
 输出到 data/kline/选股日期，图像命名为 代码_day.jpg。
 
-### 步骤 4：Doubao 图表复评
+### 步骤 4：Qwen 图表复评
 
 ~~~bash
-python agent/doubao_review.py
+python agent/qwen_review.py
 ~~~
 
 可选参数示例：
 
 ~~~bash
-python agent/doubao_review.py --config config/doubao_review.yaml
+python agent/qwen_review.py --config config/qwen_review.yaml
 ~~~
 
-配置见 [config/doubao_review.yaml](config/doubao_review.yaml)。
+配置见 [config/qwen_review.yaml](config/qwen_review.yaml)。
 
 读取候选与图表后，输出：
 
@@ -179,7 +179,7 @@ python agent/doubao_review.py --config config/doubao_review.yaml
 
 ### 6.3 复评层
 
-在 [config/doubao_review.yaml](config/doubao_review.yaml) 中可调整：
+在 [config/qwen_review.yaml](config/qwen_review.yaml) 中可调整：
 
 - model：模型名称
 - request_delay：调用间隔（防限流）
@@ -222,9 +222,9 @@ data/review/日期/suggestion.json
 
 ### Q3：Doubao 运行失败
 
-- 检查 DOUBAO_API_KEY 是否设置
+- 检查 QWEN_API_KEY 是否设置
 - 观察是否命中限流，可提高 request_delay
-- 确认模型名称 `doubao-seed-2.0-pro` 支持视觉输入
+- 确认模型名称 `qwen-3.5-plus` 支持视觉输入
 
 ### Q4：没有候选股票
 

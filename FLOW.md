@@ -13,7 +13,7 @@
     ↓
 步骤 3  dashboard/export_kline_charts.py  生成候选股 K 线图片
     ↓
-步骤 4  agent/doubao_review.py             AI 视觉分析打分        ← 图形对比核心
+步骤 4  agent/qwen_review.py             AI 视觉分析打分        ← 图形对比核心
     ↓
 步骤 5  打印推荐结果
 ```
@@ -85,9 +85,9 @@
 
 ## 步骤 4：AI 视觉分析打分（图形对比核心）
 
-**文件：** `agent/doubao_review.py`
+**文件：** `agent/qwen_review.py`
 **提示词：** `agent/prompt.md`
-**配置：** `config/doubao_review.yaml`
+**配置：** `config/qwen_review.yaml`
 **输出：** `data/review/<pick_date>/<code>.json` + `suggestion.json`
 
 ### 为什么要看图
@@ -179,6 +179,6 @@ data/review/<date>/suggestion.json      ← 步骤4 汇总推荐
 | 图表绘制 | `dashboard/components/charts.py` | Plotly K线图生成 |
 | 图表导出 | `dashboard/export_kline_charts.py` | JPG 批量导出 |
 | AI 评审基类 | `agent/base_reviewer.py` | 候选加载、结果写入、汇总逻辑 |
-| Qwen 评审 | `agent/doubao_review.py` | 调用 Doubao 视觉模型打分 |
+| Qwen 评审 | `agent/qwen_review.py` | 调用 Qwen 视觉模型打分 |
 | 评分提示词 | `agent/prompt.md` | 交易员评分框架（四维度 + 输出格式）|
 | 全流程入口 | `run_all.py` | 串联步骤 1-5 |

@@ -127,11 +127,11 @@ def main() -> None:
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
         )
 
-    # ── 步骤 4：Doubao 图表分析 ────────────────────────────────────────
+    # ── 步骤 4：Qwen 图表分析 ────────────────────────────────────────
     if start <= 4:
         _run(
-            "4/4  Doubao 图表分析（doubao_review）",
-            [PYTHON, str(ROOT / "agent" / "doubao_review.py")],
+            "4/4  Qwen 图表分析（qwen_review）",
+            [PYTHON, str(ROOT / "agent" / "qwen_review.py")],
         )
 
     # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────
