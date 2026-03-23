@@ -198,12 +198,24 @@ def export_charts(pick_date: str) -> bool:
     return True
 
 
-def run_ai_review() -> bool:
-    """运行 AI 评分"""
+def run_ai_review(max_workers: int = None, request_delay: float = None) -> bool:
+    """运行 AI 评分
+
+    Args:
+        max_workers: AI 分析并发数（可选，覆盖默认配置）
+        request_delay: AI 分析请求间隔秒数（可选，覆盖默认配置）
+    """
     print(f"  [步骤 3/3] 运行 AI 评分")
     print(f"    → 正在调用通义千问 API 分析股票...（进度见下方）\n")
 
     cmd = [PYTHON, str(ROOT / "agent" / "qwen_review.py")]
+
+    # 传递并发参数
+    if max_workers is not None:
+        cmd.extend(["--max-workers", str(max_workers)])
+    if request_delay is not None:
+        cmd.extend(["--request-delay", str(request_delay)])
+
     # 不使用 capture_output，让 AI 分析的进度实时输出到终端
     result = subprocess.run(cmd, cwd=str(ROOT), capture_output=False, text=True)
 
@@ -215,14 +227,20 @@ def run_ai_review() -> bool:
     return True
 
 
-def run_full_pipeline(pick_date: str) -> bool:
-    """运行完整选股流程"""
+def run_full_pipeline(pick_date: str, max_workers: int = None, request_delay: float = None) -> bool:
+    """运行完整选股流程
+
+    Args:
+        pick_date: 选股日
+        max_workers: AI 分析并发数（可选）
+        request_delay: AI 分析请求间隔秒数（可选）
+    """
     if not run_preselect(pick_date):
         return False
 
     export_charts(pick_date)
 
-    if not run_ai_review():
+    if not run_ai_review(max_workers=max_workers, request_delay=request_delay):
         return False
 
     return True
@@ -359,19 +377,26 @@ def load_kline_data(code: str) -> dict:
     return data
 
 
-def run_historical_backtest(months: int = 12, top_n: int = 10) -> List[MonthlyResult]:
+def run_historical_backtest(months: int = 12, top_n: int = 10,
+                            ai_workers: int = None, ai_request_delay: float = None) -> List[MonthlyResult]:
     """
     运行历史回测
 
     Args:
         months: 回测月数
         top_n: 每月选前 N 只股票（AI 评分最高）
+        ai_workers: AI 分析并发数（可选，覆盖默认配置）
+        ai_request_delay: AI 分析请求间隔秒数（可选，覆盖默认配置）
 
     Returns:
         list of MonthlyResult
     """
     print(f"\n{'='*70}")
     print(f"历史回测：过去{months}个月，每月 AI 评分前{top_n}只股票")
+    if ai_workers:
+        print(f"AI 分析并发数：{ai_workers}")
+    if ai_request_delay is not None:
+        print(f"AI 分析请求间隔：{ai_request_delay}秒")
     print(f"{'='*70}\n")
 
     # 获取所有交易日
@@ -421,7 +446,7 @@ def run_historical_backtest(months: int = 12, top_n: int = 10) -> List[MonthlyRe
 
         if suggestion is None:
             print(f"  [新运行] 未找到历史结果，开始运行选股流程...")
-            if not run_full_pipeline(pick_date):
+            if not run_full_pipeline(pick_date, max_workers=ai_workers, request_delay=ai_request_delay):
                 print(f"  [跳过] 选股流程失败")
                 continue
 
@@ -1135,6 +1160,8 @@ def main():
     parser.add_argument('--hold-days', type=int, default=30, help='持有天数（默认 30 个交易日）')
     parser.add_argument('--start', type=str, default=None, help='起始日期 (YYYY-MM-DD)，用于日期范围回测')
     parser.add_argument('--end', type=str, default=None, help='结束日期 (YYYY-MM-DD)，用于日期范围回测')
+    parser.add_argument('--ai-workers', type=int, default=None, help='AI 分析并发数（可选，覆盖配置文件）')
+    parser.add_argument('--ai-request-delay', type=float, default=None, help='AI 分析请求间隔秒数（可选）')
 
     args = parser.parse_args()
 
@@ -1144,18 +1171,27 @@ def main():
             start_date=args.start,
             end_date=args.end,
             top_n=args.top_n,
-            hold_days=args.hold_days
+            hold_days=args.hold_days,
+            ai_workers=args.ai_workers,
+            ai_request_delay=args.ai_request_delay
         )
     # 指定日期模式
     elif args.pick_date:
         results = run_single_date_backtest(
             pick_date=args.pick_date,
             top_n=args.top_n,
-            hold_days=args.hold_days
+            hold_days=args.hold_days,
+            ai_workers=args.ai_workers,
+            ai_request_delay=args.ai_request_delay
         )
     else:
         # 多月中回测模式
-        results = run_historical_backtest(months=args.months, top_n=args.top_n)
+        results = run_historical_backtest(
+            months=args.months,
+            top_n=args.top_n,
+            ai_workers=args.ai_workers,
+            ai_request_delay=args.ai_request_delay
+        )
 
     if not results:
         print("\n[错误] 回测未能生成任何结果")
@@ -1173,7 +1209,8 @@ def main():
 
 
 def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
-                            hold_days: int = 30) -> List[MonthlyResult]:
+                            hold_days: int = 30,
+                            ai_workers: int = None, ai_request_delay: float = None) -> List[MonthlyResult]:
     """
     运行日期范围回测
 
@@ -1182,6 +1219,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
         end_date: 结束日期 YYYY-MM-DD
         top_n: 选前 N 只股票
         hold_days: 持有天数（交易日）
+        ai_workers: AI 分析并发数（可选）
+        ai_request_delay: AI 分析请求间隔秒数（可选）
 
     Returns:
         list of MonthlyResult
@@ -1189,6 +1228,10 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
     print(f"\n{'='*70}")
     print(f"日期范围回测：{start_date} 至 {end_date}")
     print(f"选前{top_n}只股票，持有{hold_days}个交易日")
+    if ai_workers:
+        print(f"AI 分析并发数：{ai_workers}")
+    if ai_request_delay is not None:
+        print(f"AI 分析请求间隔：{ai_request_delay}秒")
     print(f"{'='*70}\n")
 
     # 获取交易日列表
@@ -1223,7 +1266,7 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
 
         if suggestion is None:
             print(f"  [新运行] 未找到历史结果，开始运行选股流程...")
-            if not run_full_pipeline(pick_date):
+            if not run_full_pipeline(pick_date, max_workers=ai_workers, request_delay=ai_request_delay):
                 print(f"  [跳过] 选股流程失败")
                 continue
 
@@ -1353,7 +1396,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
     return results
 
 
-def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 30) -> List[MonthlyResult]:
+def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 30,
+                             ai_workers: int = None, ai_request_delay: float = None) -> List[MonthlyResult]:
     """
     运行单日期回测
 
@@ -1361,12 +1405,18 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
         pick_date: 选股日 YYYY-MM-DD
         top_n: 选前 N 只股票
         hold_days: 持有天数（交易日）
+        ai_workers: AI 分析并发数（可选）
+        ai_request_delay: AI 分析请求间隔秒数（可选）
 
     Returns:
         list of MonthlyResult
     """
     print(f"\n{'='*70}")
     print(f"单日期回测：选股日={pick_date}, 持有{hold_days}个交易日，选前{top_n}只股票")
+    if ai_workers:
+        print(f"AI 分析并发数：{ai_workers}")
+    if ai_request_delay is not None:
+        print(f"AI 分析请求间隔：{ai_request_delay}秒")
     print(f"{'='*70}\n")
 
     # 获取交易日列表
@@ -1414,7 +1464,7 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
 
     if suggestion is None:
         print(f"  [新运行] 未找到历史结果，开始运行选股流程...")
-        if not run_full_pipeline(actual_pick_date):
+        if not run_full_pipeline(actual_pick_date, max_workers=ai_workers, request_delay=ai_request_delay):
             print(f"  [错误] 选股流程失败")
             return []
 
