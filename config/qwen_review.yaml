@@ -17,13 +17,31 @@ prompt_path: agent/prompt.md
 model: qwen3.5-plus
 
 # 相邻 API 调用间隔（秒）
-request_delay: 0
+# 单线程模式：0（无需延迟）
+# 多线程模式：0.5-1（建议值，配合并发数使用）
+request_delay: 0.5
 
 # true: 跳过已存在单股 JSON（断点续跑）
-skip_existing: false
+skip_existing: true
 
 # 推荐最小分数门槛
 suggest_min_score: 4.0
 
+# ────────────────────────────────────────────────
+# 并发控制配置
+# ────────────────────────────────────────────────
+
 # 最大并发数
+# 单线程模式：1
+# 多线程模式：根据 API 限流调整，建议 10-20（标准账号）
+# 阿里云 Qwen API 限流：RPM=30000, TPM=5000000, RPS=500
 max_workers: 10
+
+# 是否启用限流保护（推荐开启）
+use_rate_limit: true
+
+# 限流配置档位
+# - conservative: 保守档（50% 限流额度，适合小账号/测试）
+# - standard: 标准档（80% 限流额度，适合生产环境）
+# - aggressive: 激进档（90% 限流额度，适合大批量处理）
+rate_limit_profile: standard

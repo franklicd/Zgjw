@@ -1,11 +1,11 @@
 """
 base_reviewer.py
 ~~~~~~~~~~~~~~~~
-提供 LLM 图表分析的基础架构（单线程顺序调用）：
+提供 LLM 图表分析的基础架构（支持单线程/多线程模式）：
 - 加载配置和 prompt
 - 读取候选股票列表
 - 查找本地 K 线图
-- 单线程顺序调用子类实现的单股评分模型
+- 支持单线程顺序调用或线程池并发调用
 - 结果汇总和输出
 """
 
@@ -14,6 +14,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class BaseReviewer:
@@ -150,21 +151,61 @@ class BaseReviewer:
         print(f"[INFO] 待分析股票数：{len(to_process)} (已缓存 {cached_count} 支)")
 
         if to_process:
-            # 单线程顺序处理，避免 API 限流
-            print("[INFO] 单线程模式已启用，顺序调用 AI API")
-            total = len(to_process)
-            for i, candidate in enumerate(to_process, 1):
-                code = candidate["code"]
-                # 显示当前进度（开始处理前也输出）
-                print(f"\n[{i}/{total}] 正在处理：{code}")
-                result, failed_code = self._process_single_stock(candidate, pick_date, out_dir)
-                if result:
-                    all_results.append(result)
-                    verdict = result.get("verdict", "?")
-                    score = result.get("total_score", "?")
-                    print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
-                if failed_code:
-                    failed_codes.append(failed_code)
+            max_workers = self.config.get("max_workers", 1)
+
+            if max_workers <= 1:
+                # 单线程模式
+                print("[INFO] 单线程模式已启用，顺序调用 AI API")
+                total = len(to_process)
+                for i, candidate in enumerate(to_process, 1):
+                    code = candidate["code"]
+                    # 显示当前进度（开始处理前也输出）
+                    print(f"\n[{i}/{total}] 正在处理：{code}")
+                    result, failed_code = self._process_single_stock(candidate, pick_date, out_dir)
+                    if result:
+                        all_results.append(result)
+                        verdict = result.get("verdict", "?")
+                        score = result.get("total_score", "?")
+                        print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
+                    if failed_code:
+                        failed_codes.append(failed_code)
+            else:
+                # 多线程并发模式
+                print(f"[INFO] 多线程并发模式已启用，最大并发数：{max_workers}")
+
+                # 应用请求间隔
+                request_delay = self.config.get("request_delay", 0)
+
+                def process_with_delay(candidate):
+                    code = candidate["code"]
+                    print(f"\n[→] 开始处理：{code}")
+                    if request_delay > 0:
+                        time.sleep(request_delay)
+                    result, failed_code = self._process_single_stock(candidate, pick_date, out_dir)
+                    if result:
+                        verdict = result.get("verdict", "?")
+                        score = result.get("total_score", "?")
+                        print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
+                    return result, failed_code
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {executor.submit(process_with_delay, c): c for c in to_process}
+
+                    for i, future in enumerate(as_completed(futures), 1):
+                        try:
+                            result, failed_code = future.result()
+                            if result:
+                                all_results.append(result)
+                            if failed_code:
+                                failed_codes.append(failed_code)
+
+                            # 显示进度
+                            print(f"\n[进度] {i}/{len(to_process)} 完成")
+
+                        except Exception as e:
+                            code = futures[future]["code"]
+                            print(f"[❌] {code} — 异常：{e}")
+                            failed_codes.append(code)
 
         print(f"\n[INFO] 评分完成：成功 {len(all_results)} 支，失败/跳过 {len(failed_codes)} 支")
         if failed_codes:
@@ -184,8 +225,8 @@ class BaseReviewer:
         suggestion_file = out_dir / "suggestion.json"
         with open(suggestion_file, "w", encoding="utf-8") as f:
             json.dump(suggestion, f, ensure_ascii=False, indent=2)
-        print(f"[INFO] 汇总推荐已写入: {suggestion_file}")
+        print(f"[INFO] 汇总推荐已写入：{suggestion_file}")
         print(f"       推荐股票数（score≥{min_score}）: {len(suggestion['recommendations'])}")
 
         print("\n✅ 全部完成。")
-        print(f"   输出目录: {out_dir}")
+        print(f"   输出目录：{out_dir}")
