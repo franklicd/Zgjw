@@ -102,6 +102,7 @@ class BaseReviewer:
             return None, code
 
         try:
+            print(f"  → 正在分析 {code}...")
             result = self.review_stock(
                 code=code,
                 day_chart=day_chart,
@@ -151,13 +152,17 @@ class BaseReviewer:
         if to_process:
             # 单线程顺序处理，避免 API 限流
             print("[INFO] 单线程模式已启用，顺序调用 AI API")
+            total = len(to_process)
             for i, candidate in enumerate(to_process, 1):
+                code = candidate["code"]
+                # 显示当前进度（开始处理前也输出）
+                print(f"\n[{i}/{total}] 正在处理：{code}")
                 result, failed_code = self._process_single_stock(candidate, pick_date, out_dir)
                 if result:
                     all_results.append(result)
                     verdict = result.get("verdict", "?")
                     score = result.get("total_score", "?")
-                    print(f"[✅] [{i}/{len(to_process)}] {result['code']} — 完成 | verdict={verdict}, score={score}")
+                    print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
                 if failed_code:
                     failed_codes.append(failed_code)
 
