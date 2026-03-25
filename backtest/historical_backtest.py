@@ -66,6 +66,13 @@ class StockResult:
     # 新增：最大涨幅信息
     max_gain_pct: Optional[float] = None  # 最大涨幅百分比
     max_gain_day: Optional[int] = None  # 最大涨幅发生在第几天
+    # 新增：阈值触及日期追踪
+    date_10pct: Optional[str] = None      # 第一次达到 +10% 涨幅的日期
+    date_drop2pct: Optional[str] = None   # 第一次达到 -2% 跌幅的日期
+    date_drop4pct: Optional[str] = None   # 第一次达到 -4% 跌幅的日期
+    first_10pct_day: Optional[int] = None # +10% 发生在第几天
+    first_drop2_day: Optional[int] = None # -2% 发生在第几天
+    first_drop4_day: Optional[int] = None # -4% 发生在第几天
 
 
 @dataclass
@@ -198,15 +205,17 @@ def export_charts(pick_date: str) -> bool:
     return True
 
 
-def run_ai_review(max_workers: int = None, request_delay: float = None) -> bool:
+def run_ai_review(max_workers: int = None, request_delay: float = None, use_ollama: bool = False) -> bool:
     """运行 AI 评分
 
     Args:
         max_workers: AI 分析并发数（可选，覆盖默认配置）
         request_delay: AI 分析请求间隔秒数（可选，覆盖默认配置）
+        use_ollama: 是否使用 Ollama 本地模型（默认 False，使用阿里云 API）
     """
     print(f"  [步骤 3/3] 运行 AI 评分")
-    print(f"    → 正在调用通义千问 API 分析股票...（进度见下方）\n")
+    model_type = "Ollama 本地模型" if use_ollama else "通义千问 API"
+    print(f"    → 使用 {model_type} 分析股票...（进度见下方）\n")
 
     cmd = [PYTHON, str(ROOT / "agent" / "qwen_review.py")]
 
@@ -215,6 +224,8 @@ def run_ai_review(max_workers: int = None, request_delay: float = None) -> bool:
         cmd.extend(["--max-workers", str(max_workers)])
     if request_delay is not None:
         cmd.extend(["--request-delay", str(request_delay)])
+    if use_ollama:
+        cmd.extend(["--use-ollama"])
 
     # 不使用 capture_output，让 AI 分析的进度实时输出到终端
     result = subprocess.run(cmd, cwd=str(ROOT), capture_output=False, text=True)
@@ -227,20 +238,22 @@ def run_ai_review(max_workers: int = None, request_delay: float = None) -> bool:
     return True
 
 
-def run_full_pipeline(pick_date: str, max_workers: int = None, request_delay: float = None) -> bool:
+def run_full_pipeline(pick_date: str, max_workers: int = None, request_delay: float = None,
+                      use_ollama: bool = False) -> bool:
     """运行完整选股流程
 
     Args:
         pick_date: 选股日
         max_workers: AI 分析并发数（可选）
         request_delay: AI 分析请求间隔秒数（可选）
+        use_ollama: 是否使用 Ollama 本地模型（默认 False）
     """
     if not run_preselect(pick_date):
         return False
 
     export_charts(pick_date)
 
-    if not run_ai_review(max_workers=max_workers, request_delay=request_delay):
+    if not run_ai_review(max_workers=max_workers, request_delay=request_delay, use_ollama=use_ollama):
         return False
 
     return True
@@ -357,6 +370,89 @@ def calc_max_gain_during_period(code: str, pick_date: str, target_date: str,
     return max_gain_pct, max_day_idx
 
 
+def track_threshold_dates(code: str, pick_date: str, target_date: str,
+                          pick_price: float, trading_dates: List[str],
+                          kline_cache: dict) -> Dict:
+    """
+    追踪选股日后到目标日期间，股票第一次达到 +10%、-2%、-4% 阈值的日期
+
+    Args:
+        code: 股票代码
+        pick_date: 选股日 YYYY-MM-DD
+        target_date: 目标日 YYYY-MM-DD
+        pick_price: 选股日价格（pick_date 收盘价）
+        trading_dates: 交易日列表
+        kline_cache: K 线数据缓存
+
+    Returns:
+        dict with date_10pct, date_drop2pct, date_drop4pct, first_10pct_day, first_drop2_day, first_drop4_day
+    """
+    result = {
+        'date_10pct': None, 'first_10pct_day': None,
+        'date_drop2pct': None, 'first_drop2_day': None,
+        'date_drop4pct': None, 'first_drop4_day': None,
+    }
+
+    if code not in kline_cache:
+        kline_cache[code] = load_kline_data(code)
+
+    kline_data = kline_cache[code]
+    if not kline_data:
+        return result
+
+    # 找到选股日和目标日之间的所有交易日
+    start_idx = -1
+    end_idx = -1
+
+    for i, d in enumerate(trading_dates):
+        if d >= pick_date and start_idx < 0:
+            start_idx = i
+        if d >= target_date and end_idx < 0:
+            end_idx = i
+            break
+
+    if start_idx < 0 or start_idx >= len(trading_dates):
+        return result
+
+    if end_idx < 0:
+        end_idx = len(trading_dates) - 1
+
+    # 阈值计算
+    target_10pct = pick_price * 1.10  # +10%
+    target_drop2 = pick_price * 0.98  # -2%
+    target_drop4 = pick_price * 0.96  # -4%
+
+    # 遍历期间的所有价格，找第一次触及阈值的日期
+    for i in range(start_idx, min(end_idx + 1, len(trading_dates))):
+        d = trading_dates[i]
+        if d not in kline_data:
+            continue
+
+        price = kline_data[d]['close']
+        day_idx = i - start_idx
+
+        # 检查 +10%
+        if result['date_10pct'] is None and price >= target_10pct:
+            result['date_10pct'] = d
+            result['first_10pct_day'] = day_idx
+
+        # 检查 -2%
+        if result['date_drop2pct'] is None and price <= target_drop2:
+            result['date_drop2pct'] = d
+            result['first_drop2_day'] = day_idx
+
+        # 检查 -4%
+        if result['date_drop4pct'] is None and price <= target_drop4:
+            result['date_drop4pct'] = d
+            result['first_drop4_day'] = day_idx
+
+        # 如果三个阈值都已触及，提前退出
+        if all(result[key] is not None for key in ['date_10pct', 'date_drop2pct', 'date_drop4pct']):
+            break
+
+    return result
+
+
 def load_kline_data(code: str) -> dict:
     """加载 K 线数据"""
     kline_file = RAW_DIR / f"{code}.csv"
@@ -378,7 +474,8 @@ def load_kline_data(code: str) -> dict:
 
 
 def run_historical_backtest(months: int = 12, top_n: int = 10,
-                            ai_workers: int = None, ai_request_delay: float = None) -> List[MonthlyResult]:
+                            ai_workers: int = None, ai_request_delay: float = None,
+                            use_ollama: bool = False) -> List[MonthlyResult]:
     """
     运行历史回测
 
@@ -387,12 +484,15 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
         top_n: 每月选前 N 只股票（AI 评分最高）
         ai_workers: AI 分析并发数（可选，覆盖默认配置）
         ai_request_delay: AI 分析请求间隔秒数（可选，覆盖默认配置）
+        use_ollama: 是否使用 Ollama 本地模型（默认 False，使用阿里云 API）
 
     Returns:
         list of MonthlyResult
     """
     print(f"\n{'='*70}")
     print(f"历史回测：过去{months}个月，每月 AI 评分前{top_n}只股票")
+    model_type = "Ollama 本地模型" if use_ollama else "阿里云 API"
+    print(f"AI 分析模式：{model_type}")
     if ai_workers:
         print(f"AI 分析并发数：{ai_workers}")
     if ai_request_delay is not None:
@@ -446,7 +546,8 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
 
         if suggestion is None:
             print(f"  [新运行] 未找到历史结果，开始运行选股流程...")
-            if not run_full_pipeline(pick_date, max_workers=ai_workers, request_delay=ai_request_delay):
+            if not run_full_pipeline(pick_date, max_workers=ai_workers, request_delay=ai_request_delay,
+                                      use_ollama=use_ollama):
                 print(f"  [跳过] 选股流程失败")
                 continue
 
@@ -535,13 +636,18 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
             max_gain_pct, max_gain_day = calc_max_gain_during_period(
                 code, pick_date, target_date, pick_price, trading_dates, kline_cache)
 
+            # 追踪阈值触及日期
+            threshold_data = track_threshold_dates(
+                code, pick_date, target_date, pick_price, trading_dates, kline_cache)
+
             stock_results.append(StockResult(
                 code=code, name=name, rank=rank, score=score,
                 pick_price=pick_price, target_price=target_price,
                 change_pct=change_pct, pick_date=pick_date,
                 target_date=target_date, verdict=verdict,
                 signal_type=signal_type, strategy=strategy, status=status,
-                max_gain_pct=max_gain_pct, max_gain_day=max_gain_day
+                max_gain_pct=max_gain_pct, max_gain_day=max_gain_day,
+                **threshold_data
             ))
 
         # 6. 统计月度结果
@@ -857,6 +963,120 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     actual_start = start_date or (min(s.pick_date for s in all_stocks) if all_stocks else "N/A")
     actual_end = end_date or (max(s.pick_date for s in all_stocks) if all_stocks else "N/A")
 
+    # ────────────────────────────────────────────────
+    # 阈值触及统计（+10%, -2%, -4%）
+    # ────────────────────────────────────────────────
+
+    # 1. 基础统计：触及各类阈值的股票数量
+    count_10pct = sum(1 for s in all_stocks if s.date_10pct is not None)
+    count_drop2 = sum(1 for s in all_stocks if s.date_drop2pct is not None)
+    count_drop4 = sum(1 for s in all_stocks if s.date_drop4pct is not None)
+
+    pct_10pct = (count_10pct / total_count * 100) if total_count > 0 else 0
+    pct_drop2 = (count_drop2 / total_count * 100) if total_count > 0 else 0
+    pct_drop4 = (count_drop4 / total_count * 100) if total_count > 0 else 0
+
+    # 2. 反转形态统计：先跌后涨
+    # 先跌 2% 后涨 10%：date_drop2pct 的日期早于 date_10pct
+    count_drop2_then_10pct = sum(
+        1 for s in all_stocks
+        if s.date_drop2pct is not None and s.date_10pct is not None
+        and s.date_drop2pct < s.date_10pct
+    )
+    # 先跌 4% 后涨 10%：date_drop4pct 的日期早于 date_10pct
+    count_drop4_then_10pct = sum(
+        1 for s in all_stocks
+        if s.date_drop4pct is not None and s.date_10pct is not None
+        and s.date_drop4pct < s.date_10pct
+    )
+
+    pct_drop2_then_10pct = (count_drop2_then_10pct / total_count * 100) if total_count > 0 else 0
+    pct_drop4_then_10pct = (count_drop4_then_10pct / total_count * 100) if total_count > 0 else 0
+
+    # 3. 触及阈值的时间分布（第几天）
+    def calc_day_stats(stocks, day_attr):
+        """计算触及天数的统计信息"""
+        valid_days = [getattr(s, day_attr) for s in stocks if getattr(s, day_attr) is not None]
+        if not valid_days:
+            return {'avg': 0, 'median': 0, 'min': 0, 'max': 0}
+        return {
+            'avg': sum(valid_days) / len(valid_days),
+            'median': sorted(valid_days)[len(valid_days) // 2],
+            'min': min(valid_days),
+            'max': max(valid_days),
+        }
+
+    day_10pct_stats = calc_day_stats(all_stocks, 'first_10pct_day')
+    day_drop2_stats = calc_day_stats(all_stocks, 'first_drop2_day')
+    day_drop4_stats = calc_day_stats(all_stocks, 'first_drop4_day')
+
+    # 4. 按 AI 分数分组的阈值触及率
+    score_threshold_groups = [
+        (4.5, float('inf'), "4.5 分+"),
+        (4.0, 4.5, "4.0-4.5 分"),
+        (0, 4.0, "0-4.0 分"),
+    ]
+    score_threshold_stats = []
+    for low, high, label in score_threshold_groups:
+        group = [s for s in all_stocks if low <= s.score < high]
+        if group:
+            g_total = len(group)
+            g_count_10pct = sum(1 for s in group if s.date_10pct is not None)
+            g_count_drop2 = sum(1 for s in group if s.date_drop2pct is not None)
+            g_count_drop4 = sum(1 for s in group if s.date_drop4pct is not None)
+            g_count_drop2_then_10pct = sum(
+                1 for s in group
+                if s.date_drop2pct is not None and s.date_10pct is not None
+                and s.date_drop2pct < s.date_10pct
+            )
+            g_count_drop4_then_10pct = sum(
+                1 for s in group
+                if s.date_drop4pct is not None and s.date_10pct is not None
+                and s.date_drop4pct < s.date_10pct
+            )
+            score_threshold_stats.append({
+                'label': label, 'count': g_total,
+                'count_10pct': g_count_10pct, 'pct_10pct': (g_count_10pct / g_total * 100) if g_total > 0 else 0,
+                'count_drop2': g_count_drop2, 'pct_drop2': (g_count_drop2 / g_total * 100) if g_total > 0 else 0,
+                'count_drop4': g_count_drop4, 'pct_drop4': (g_count_drop4 / g_total * 100) if g_total > 0 else 0,
+                'count_drop2_then_10pct': g_count_drop2_then_10pct, 'pct_drop2_then_10pct': (g_count_drop2_then_10pct / g_total * 100) if g_total > 0 else 0,
+                'count_drop4_then_10pct': g_count_drop4_then_10pct, 'pct_drop4_then_10pct': (g_count_drop4_then_10pct / g_total * 100) if g_total > 0 else 0,
+            })
+
+    # 5. 按排名分组的阈值触及率
+    rank_threshold_groups = [
+        (1, 3, "第 1-3 名"),
+        (4, 5, "第 4-5 名"),
+        (6, 7, "第 6-7 名"),
+        (8, 10, "第 8-10 名"),
+    ]
+    rank_threshold_stats = []
+    for low, high, label in rank_threshold_groups:
+        group = [s for s in all_stocks if low <= s.rank <= high]
+        if group:
+            g_total = len(group)
+            g_count_10pct = sum(1 for s in group if s.date_10pct is not None)
+            g_count_drop2 = sum(1 for s in group if s.date_drop2pct is not None)
+            g_count_drop4 = sum(1 for s in group if s.date_drop4pct is not None)
+            g_count_drop2_then_10pct = sum(
+                1 for s in group
+                if s.date_drop2pct is not None and s.date_10pct is not None
+                and s.date_drop2pct < s.date_10pct
+            )
+            g_count_drop4_then_10pct = sum(
+                1 for s in group
+                if s.date_drop4pct is not None and s.date_10pct is not None
+                and s.date_drop4pct < s.date_10pct
+            )
+            rank_threshold_stats.append({
+                'label': label, 'count': g_total,
+                'count_10pct': g_count_10pct, 'pct_10pct': (g_count_10pct / g_total * 100) if g_total > 0 else 0,
+                'count_drop2': g_count_drop2, 'pct_drop2': (g_count_drop2 / g_total * 100) if g_total > 0 else 0,
+                'count_drop4': g_count_drop4, 'pct_drop4': (g_count_drop4 / g_total * 100) if g_total > 0 else 0,
+                'count_drop2_then_10pct': g_count_drop2_then_10pct,
+                'count_drop4_then_10pct': g_count_drop4_then_10pct,
+            })
+
     # 生成 Markdown
     md_lines = []
     md_lines.append("# B1 碗口反弹策略回测分析报告（每日选股版）")
@@ -949,10 +1169,64 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
-    # 四、排名与盈亏相关性分析
-    md_lines.append("## 四、排名与盈亏相关性分析")
+    # 四、阈值触及统计（+10%, -2%, -4%）
+    md_lines.append("## 四、阈值触及统计")
     md_lines.append("")
-    md_lines.append("### 4.1 不同排名区间的盈亏表现")
+    md_lines.append("### 4.1 基础触及统计")
+    md_lines.append("")
+    md_lines.append("| 阈值类型 | 触及数量 | 触及率 |")
+    md_lines.append("|----------|----------|-------|")
+    md_lines.append(f"| ≥+10% (涨幅) | {count_10pct} | {pct_10pct:.1f}% |")
+    md_lines.append(f"| ≤-2% (跌幅) | {count_drop2} | {pct_drop2:.1f}% |")
+    md_lines.append(f"| ≤-4% (跌幅) | {count_drop4} | {pct_drop4:.1f}% |")
+    md_lines.append("")
+
+    md_lines.append("### 4.2 反转形态统计")
+    md_lines.append("")
+    md_lines.append("| 反转形态 | 数量 | 占比 | 说明 |")
+    md_lines.append("|----------|------|------|------|")
+    md_lines.append(f"| 先跌 2% 后涨 10% | {count_drop2_then_10pct} | {pct_drop2_then_10pct:.1f}% | 触及 -2% 后又触及 +10% |")
+    md_lines.append(f"| 先跌 4% 后涨 10% | {count_drop4_then_10pct} | {pct_drop4_then_10pct:.1f}% | 触及 -4% 后又触及 +10% |")
+    md_lines.append("")
+
+    md_lines.append("### 4.3 触及时间统计（第几天）")
+    md_lines.append("")
+    md_lines.append("| 阈值 | 平均天数 | 中位天数 | 最早 | 最晚 |")
+    md_lines.append("|------|----------|----------|------|------|")
+    md_lines.append(f"| +10% | {day_10pct_stats['avg']:.1f} | {day_10pct_stats['median']:.1f} | {day_10pct_stats['min']} | {day_10pct_stats['max']} |")
+    md_lines.append(f"| -2% | {day_drop2_stats['avg']:.1f} | {day_drop2_stats['median']:.1f} | {day_drop2_stats['min']} | {day_drop2_stats['max']} |")
+    md_lines.append(f"| -4% | {day_drop4_stats['avg']:.1f} | {day_drop4_stats['median']:.1f} | {day_drop4_stats['min']} | {day_drop4_stats['max']} |")
+    md_lines.append("")
+
+    md_lines.append("### 4.4 按 AI 分数分组的阈值触及率")
+    md_lines.append("")
+    md_lines.append("| 分数区间 | 样本数 | +10% 触及率 | -2% 触及率 | -4% 触及率 | 先 -2% 后 +10% | 先 -4% 后 +10% |")
+    md_lines.append("|----------|--------|------------|-----------|-----------|-------------|-------------|")
+    for st in score_threshold_stats:
+        md_lines.append(f"| {st['label']} | {st['count']} | {st['pct_10pct']:.1f}% | {st['pct_drop2']:.1f}% | {st['pct_drop4']:.1f}% | {st['pct_drop2_then_10pct']:.1f}% | {st['pct_drop4_then_10pct']:.1f}% |")
+    md_lines.append("")
+
+    md_lines.append("### 4.5 按排名分组的阈值触及率")
+    md_lines.append("")
+    md_lines.append("| 排名区间 | 样本数 | +10% 触及率 | -2% 触及率 | -4% 触及率 |")
+    md_lines.append("|----------|--------|------------|-----------|-----------|")
+    for rt in rank_threshold_stats:
+        md_lines.append(f"| {rt['label']} | {rt['count']} | {rt['pct_10pct']:.1f}% | {rt['pct_drop2']:.1f}% | {rt['pct_drop4']:.1f}% |")
+    md_lines.append("")
+
+    md_lines.append("**结论**:")
+    md_lines.append(f"- 约 **{pct_10pct:.1f}%** 的股票在持有期内触及 +10% 涨幅，说明策略存在获利机会")
+    md_lines.append(f"- 约 **{pct_drop2:.1f}%** 的股票触及 -2% 跌幅，**{pct_drop4:.1f}%** 触及 -4% 跌幅")
+    md_lines.append(f"- 先跌后涨的反转形态占比：{pct_drop2_then_10pct:.1f}% (先 -2% 后 +10%)，{pct_drop4_then_10pct:.1f}% (先 -4% 后 +10%)")
+    md_lines.append(f"- 如果反转形态占比较高，说明**坚守持有期**可能带来反转收益")
+    md_lines.append("")
+    md_lines.append("---")
+    md_lines.append("")
+
+    # 五、排名与盈亏相关性分析
+    md_lines.append("## 五、排名与盈亏相关性分析")
+    md_lines.append("")
+    md_lines.append("### 5.1 不同排名区间的盈亏表现")
     md_lines.append("")
     md_lines.append("| 排名区间 | 样本数 | 胜率 | 平均盈亏 | 最大涨幅均值 |")
     md_lines.append("|----------|--------|------|----------|--------------|")
@@ -960,7 +1234,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
         md_lines.append(f"| {rs['label']} | {rs['count']} | {rs['win_rate']:.1f}% | {rs['avg_gain']:+.2f}% | {rs['avg_max_gain']:+.2f}% |")
     md_lines.append("")
 
-    md_lines.append("### 4.2 相关系数")
+    md_lines.append("### 5.2 相关系数")
     md_lines.append("")
     md_lines.append("| 相关关系 | Pearson 系数 |")
     md_lines.append("|----------|--------------|")
@@ -977,10 +1251,10 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
-    # 五、分数与盈亏相关性分析（用分数替代相似度）
-    md_lines.append("## 五、分数与盈亏相关性分析")
+    # 六、分数与盈亏相关性分析（用分数替代相似度）
+    md_lines.append("## 六、分数与盈亏相关性分析")
     md_lines.append("")
-    md_lines.append("### 4.1 不同分数区间的盈亏表现")
+    md_lines.append("### 6.1 不同分数区间的盈亏表现")
     md_lines.append("")
     md_lines.append("| 分数 | 样本数 | 胜率 | 平均盈亏 | 最大涨幅均值 |")
     md_lines.append("|--------|--------|------|----------|--------------|")
@@ -988,7 +1262,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
         md_lines.append(f"| {ss['label']} | {ss['count']} | {ss['win_rate']:.1f}% | {ss['avg_gain']:+.2f}% | {ss['avg_max_gain']:+.2f}% |")
     md_lines.append("")
 
-    md_lines.append("### 4.2 相关系数")
+    md_lines.append("### 6.2 相关系数")
     md_lines.append("")
     md_lines.append("| 相关关系 | Pearson 系数 |")
     md_lines.append("|----------|--------------|")
@@ -1002,7 +1276,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
         md_lines.append(f"- 分数与盈亏存在**{'正' if score_corr > 0 else '负'}相关性**")
     md_lines.append("")
 
-    md_lines.append("### 4.3 高分数股票详情（≥4.0 分）")
+    md_lines.append("### 6.3 高分数股票详情（≥4.0 分）")
     md_lines.append("")
     md_lines.append("| 代码 | 名称 | 分数 | 最大涨幅 | 最终盈亏 | 选股日期 |")
     md_lines.append("|------|------|--------|----------|----------|----------|")
@@ -1027,10 +1301,10 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
-    # 六、最大涨幅 vs 最终盈亏对比
-    md_lines.append("## 六、最大涨幅 vs 最终盈亏对比")
+    # 七、最大涨幅 vs 最终盈亏对比
+    md_lines.append("## 七、最大涨幅 vs 最终盈亏对比")
     md_lines.append("")
-    md_lines.append("### 6.1 差异统计")
+    md_lines.append("### 7.1 差异统计")
     md_lines.append("")
     md_lines.append("")
     md_lines.append("| 指标 | 数值 |")
@@ -1048,10 +1322,10 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
-    # 七、选股分类与盈亏关系
-    md_lines.append("## 七、选股分类与盈亏关系")
+    # 八、选股分类与盈亏关系
+    md_lines.append("## 八、选股分类与盈亏关系")
     md_lines.append("")
-    md_lines.append("### 7.1 不同分类的表现")
+    md_lines.append("### 8.1 不同分类的表现")
     md_lines.append("")
     md_lines.append("| 分类 | 样本数 | 胜率 | 平均盈亏 | 最大涨幅均值 |")
     md_lines.append("|------|--------|------|----------|--------------|")
@@ -1066,34 +1340,60 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
-    # 八、关键发现总结
-    md_lines.append("## 八、关键发现总结")
+    # 九、阈值触及统计总结
+    md_lines.append("## 九、阈值触及统计总结")
     md_lines.append("")
-    md_lines.append("### 8.1 时间分布特征")
+    md_lines.append("### 9.1 触及率概览")
+    md_lines.append(f"- **+10% 涨幅触及率**: {pct_10pct:.1f}% ({count_10pct} 只股票)")
+    md_lines.append(f"- **-2% 跌幅触及率**: {pct_drop2:.1f}% ({count_drop2} 只股票)")
+    md_lines.append(f"- **-4% 跌幅触及率**: {pct_drop4:.1f}% ({count_drop4} 只股票)")
+    md_lines.append("")
+    md_lines.append("### 9.2 反转形态总结")
+    md_lines.append(f"- **先跌 2% 后涨 10%**: {count_drop2_then_10pct} 只 ({pct_drop2_then_10pct:.1f}%)")
+    md_lines.append(f"- **先跌 4% 后涨 10%**: {count_drop4_then_10pct} 只 ({pct_drop4_then_10pct:.1f}%)")
+    md_lines.append("")
+    md_lines.append("### 9.3 触及时间特征")
+    md_lines.append(f"- +10% 平均触及时间：**{day_10pct_stats['avg']:.1f} 天**")
+    md_lines.append(f"- -2% 平均触及时间：**{day_drop2_stats['avg']:.1f} 天**")
+    md_lines.append(f"- -4% 平均触及时间：**{day_drop4_stats['avg']:.1f} 天**")
+    md_lines.append("")
+    md_lines.append("---")
+    md_lines.append("")
+
+    # 十、关键发现总结
+    md_lines.append("## 十、关键发现总结")
+    md_lines.append("")
+    md_lines.append("### 10.1 时间分布特征")
     md_lines.append(f"- 最大涨幅中位时间为 **{median_max_gain_day} 天**，平均 **{avg_max_gain_day:.1f} 天**")
     md_lines.append("- 分布较为均匀，获利机会在持有期内各阶段都可能出现")
     md_lines.append("")
-    md_lines.append("### 8.2 盈亏分布特征")
+    md_lines.append("### 10.2 盈亏分布特征")
     md_lines.append(f"- 策略整体**{'盈利' if overall_avg_gain > 0 else '亏损'}**，胜率 **{overall_win_rate:.1f}%**")
     md_lines.append(f"- 平均收益 **{overall_avg_gain:+.2f}%**")
     md_lines.append("")
-    md_lines.append("### 8.3 排名相关性")
+    md_lines.append("### 10.3 排名相关性")
     md_lines.append(f"- 排名与最终盈亏的相关系数为 **{rank_corr:.4f}**")
     if abs(rank_corr) < 0.05:
         md_lines.append("- B1 图形匹配的排名不能完全预测 30 日后的涨跌")
     md_lines.append("")
-    md_lines.append("### 8.4 分数相关性")
+    md_lines.append("### 10.4 分数相关性")
     md_lines.append(f"- 分数与最终盈亏的相关系数为 **{score_corr:.4f}**")
     if abs(score_corr) < 0.05:
         md_lines.append("- 分数对盈亏没有明显预测作用")
     md_lines.append("")
-    md_lines.append("### 8.5 最大涨幅启示")
+    md_lines.append("### 10.5 最大涨幅启示")
     md_lines.append(f"- 平均最大涨幅 ({avg_max_gain:.2f}%) 高于最终盈亏 ({overall_avg_gain:+.2f}%)")
     md_lines.append(f"- **{diff_pct:.1f}%** 的股票曾达到过比最终盈亏高 5% 以上的涨幅")
     md_lines.append("- 说明持有期内大部分股票都有过不错的表现，但最后回吐了涨幅")
     md_lines.append("- **建议**: 考虑引入动态止盈策略（如达到 8-10% 涨幅时提前止盈）")
     md_lines.append("")
-    md_lines.append("### 8.6 分类策略建议")
+    md_lines.append("### 10.6 阈值触及启示")
+    md_lines.append(f"- 约 {pct_10pct:.1f}% 的股票在持有期内达到过 +10% 涨幅")
+    md_lines.append(f"- 约 {pct_drop2_then_10pct:.1f}% 的股票经历了先跌 2% 后涨 10% 的反转")
+    md_lines.append(f"- 约 {pct_drop4_then_10pct:.1f}% 的股票经历了先跌 4% 后涨 10% 的深 V 反转")
+    md_lines.append("- 这表明坚守持有期对部分股票是有效的，能够捕捉到反转收益")
+    md_lines.append("")
+    md_lines.append("### 10.7 分类策略建议")
     if best_cat:
         md_lines.append(f"- \"{best_cat['category']}\" 分类表现最佳")
         md_lines.append(f"- **建议**: 可优先选择该分类的股票，或增加其权重")
@@ -1101,8 +1401,8 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
-    # 九、策略优化建议
-    md_lines.append("## 九、策略优化建议")
+    # 十一、策略优化建议
+    md_lines.append("## 十一、策略优化建议")
     md_lines.append("")
     md_lines.append("基于以上分析，提出以下优化建议：")
     md_lines.append("")
@@ -1155,13 +1455,20 @@ def main():
     parser.add_argument('--months', type=int, default=12, help='回测月数（默认 12）')
     parser.add_argument('--top-n', type=int, default=10, help='每月选股数量（默认 10）')
     parser.add_argument('--output', type=str, default=None, help='输出 JSON 文件路径')
-    parser.add_argument('--report', type=str, default=None, help='输出 Markdown 报告文件路径')
+    parser.add_argument('--report', type=str, help='输出 Markdown 报告文件路径（默认：backtest/backtest_report.md）')
     parser.add_argument('--pick-date', type=str, default=None, help='指定选股日 (YYYY-MM-DD)，用于单日期回测')
     parser.add_argument('--hold-days', type=int, default=30, help='持有天数（默认 30 个交易日）')
     parser.add_argument('--start', type=str, default=None, help='起始日期 (YYYY-MM-DD)，用于日期范围回测')
     parser.add_argument('--end', type=str, default=None, help='结束日期 (YYYY-MM-DD)，用于日期范围回测')
     parser.add_argument('--ai-workers', type=int, default=None, help='AI 分析并发数（可选，覆盖配置文件）')
     parser.add_argument('--ai-request-delay', type=float, default=None, help='AI 分析请求间隔秒数（可选）')
+    parser.add_argument('--use-ollama', action='store_true', help='使用 Ollama 本地模型（默认使用阿里云 API）')
+
+    args = parser.parse_args()
+
+    # 默认报告路径
+    if args.report is None:
+        args.report = str(Path(__file__).parent / 'backtest_report.md')
 
     args = parser.parse_args()
 
@@ -1173,7 +1480,8 @@ def main():
             top_n=args.top_n,
             hold_days=args.hold_days,
             ai_workers=args.ai_workers,
-            ai_request_delay=args.ai_request_delay
+            ai_request_delay=args.ai_request_delay,
+            use_ollama=args.use_ollama
         )
     # 指定日期模式
     elif args.pick_date:
@@ -1182,7 +1490,8 @@ def main():
             top_n=args.top_n,
             hold_days=args.hold_days,
             ai_workers=args.ai_workers,
-            ai_request_delay=args.ai_request_delay
+            ai_request_delay=args.ai_request_delay,
+            use_ollama=args.use_ollama
         )
     else:
         # 多月中回测模式
@@ -1190,7 +1499,8 @@ def main():
             months=args.months,
             top_n=args.top_n,
             ai_workers=args.ai_workers,
-            ai_request_delay=args.ai_request_delay
+            ai_request_delay=args.ai_request_delay,
+            use_ollama=args.use_ollama
         )
 
     if not results:
@@ -1210,7 +1520,8 @@ def main():
 
 def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
                             hold_days: int = 30,
-                            ai_workers: int = None, ai_request_delay: float = None) -> List[MonthlyResult]:
+                            ai_workers: int = None, ai_request_delay: float = None,
+                            use_ollama: bool = False) -> List[MonthlyResult]:
     """
     运行日期范围回测
 
@@ -1221,6 +1532,7 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
         hold_days: 持有天数（交易日）
         ai_workers: AI 分析并发数（可选）
         ai_request_delay: AI 分析请求间隔秒数（可选）
+        use_ollama: 是否使用 Ollama 本地模型（默认 False）
 
     Returns:
         list of MonthlyResult
@@ -1228,6 +1540,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
     print(f"\n{'='*70}")
     print(f"日期范围回测：{start_date} 至 {end_date}")
     print(f"选前{top_n}只股票，持有{hold_days}个交易日")
+    model_type = "Ollama 本地模型" if use_ollama else "阿里云 API"
+    print(f"AI 分析模式：{model_type}")
     if ai_workers:
         print(f"AI 分析并发数：{ai_workers}")
     if ai_request_delay is not None:
@@ -1266,7 +1580,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
 
         if suggestion is None:
             print(f"  [新运行] 未找到历史结果，开始运行选股流程...")
-            if not run_full_pipeline(pick_date, max_workers=ai_workers, request_delay=ai_request_delay):
+            if not run_full_pipeline(pick_date, max_workers=ai_workers, request_delay=ai_request_delay,
+                                      use_ollama=use_ollama):
                 print(f"  [跳过] 选股流程失败")
                 continue
 
@@ -1356,13 +1671,18 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
             max_gain_pct, max_gain_day = calc_max_gain_during_period(
                 code, pick_date, target_date, pick_price, trading_dates, kline_cache)
 
+            # 追踪阈值触及日期
+            threshold_data = track_threshold_dates(
+                code, pick_date, target_date, pick_price, trading_dates, kline_cache)
+
             stock_results.append(StockResult(
                 code=code, name=name, rank=rank, score=score,
                 pick_price=pick_price, target_price=target_price,
                 change_pct=change_pct, pick_date=pick_date,
                 target_date=target_date, verdict=verdict,
                 signal_type=signal_type, strategy=strategy, status=status,
-                max_gain_pct=max_gain_pct, max_gain_day=max_gain_day
+                max_gain_pct=max_gain_pct, max_gain_day=max_gain_day,
+                **threshold_data
             ))
 
         # 6. 统计结果
@@ -1397,7 +1717,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
 
 
 def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 30,
-                             ai_workers: int = None, ai_request_delay: float = None) -> List[MonthlyResult]:
+                             ai_workers: int = None, ai_request_delay: float = None,
+                             use_ollama: bool = False) -> List[MonthlyResult]:
     """
     运行单日期回测
 
@@ -1407,12 +1728,15 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
         hold_days: 持有天数（交易日）
         ai_workers: AI 分析并发数（可选）
         ai_request_delay: AI 分析请求间隔秒数（可选）
+        use_ollama: 是否使用 Ollama 本地模型（默认 False）
 
     Returns:
         list of MonthlyResult
     """
     print(f"\n{'='*70}")
     print(f"单日期回测：选股日={pick_date}, 持有{hold_days}个交易日，选前{top_n}只股票")
+    model_type = "Ollama 本地模型" if use_ollama else "阿里云 API"
+    print(f"AI 分析模式：{model_type}")
     if ai_workers:
         print(f"AI 分析并发数：{ai_workers}")
     if ai_request_delay is not None:
@@ -1464,7 +1788,8 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
 
     if suggestion is None:
         print(f"  [新运行] 未找到历史结果，开始运行选股流程...")
-        if not run_full_pipeline(actual_pick_date, max_workers=ai_workers, request_delay=ai_request_delay):
+        if not run_full_pipeline(actual_pick_date, max_workers=ai_workers, request_delay=ai_request_delay,
+                                  use_ollama=use_ollama):
             print(f"  [错误] 选股流程失败")
             return []
 
@@ -1547,13 +1872,18 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
         max_gain_pct, max_gain_day = calc_max_gain_during_period(
             code, actual_pick_date, target_date, pick_price, trading_dates, kline_cache)
 
+        # 追踪阈值触及日期
+        threshold_data = track_threshold_dates(
+            code, actual_pick_date, target_date, pick_price, trading_dates, kline_cache)
+
         stock_results.append(StockResult(
             code=code, name=name, rank=rank, score=score,
             pick_price=pick_price, target_price=target_price,
             change_pct=change_pct, pick_date=actual_pick_date,
             target_date=target_date, verdict=verdict,
             signal_type=signal_type, strategy=strategy, status=status,
-            max_gain_pct=max_gain_pct, max_gain_day=max_gain_day
+            max_gain_pct=max_gain_pct, max_gain_day=max_gain_day,
+            **threshold_data
         ))
 
     # 5. 统计结果
