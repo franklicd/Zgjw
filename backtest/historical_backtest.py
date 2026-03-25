@@ -1455,7 +1455,7 @@ def main():
     parser.add_argument('--months', type=int, default=12, help='回测月数（默认 12）')
     parser.add_argument('--top-n', type=int, default=10, help='每月选股数量（默认 10）')
     parser.add_argument('--output', type=str, default=None, help='输出 JSON 文件路径')
-    parser.add_argument('--report', type=str, help='输出 Markdown 报告文件路径（默认：backtest/backtest_report.md）')
+    parser.add_argument('--report', type=str, help='输出 Markdown 报告文件路径（默认自动生成带时间范围的文件名）')
     parser.add_argument('--pick-date', type=str, default=None, help='指定选股日 (YYYY-MM-DD)，用于单日期回测')
     parser.add_argument('--hold-days', type=int, default=30, help='持有天数（默认 30 个交易日）')
     parser.add_argument('--start', type=str, default=None, help='起始日期 (YYYY-MM-DD)，用于日期范围回测')
@@ -1463,12 +1463,6 @@ def main():
     parser.add_argument('--ai-workers', type=int, default=None, help='AI 分析并发数（可选，覆盖配置文件）')
     parser.add_argument('--ai-request-delay', type=float, default=None, help='AI 分析请求间隔秒数（可选）')
     parser.add_argument('--use-ollama', action='store_true', help='使用 Ollama 本地模型（默认使用阿里云 API）')
-
-    args = parser.parse_args()
-
-    # 默认报告路径
-    if args.report is None:
-        args.report = str(Path(__file__).parent / 'backtest_report.md')
 
     args = parser.parse_args()
 
@@ -1483,6 +1477,7 @@ def main():
             ai_request_delay=args.ai_request_delay,
             use_ollama=args.use_ollama
         )
+        actual_start, actual_end = args.start, args.end
     # 指定日期模式
     elif args.pick_date:
         results = run_single_date_backtest(
@@ -1493,6 +1488,7 @@ def main():
             ai_request_delay=args.ai_request_delay,
             use_ollama=args.use_ollama
         )
+        actual_start, actual_end = args.pick_date, args.pick_date
     else:
         # 多月中回测模式
         results = run_historical_backtest(
@@ -1502,10 +1498,22 @@ def main():
             ai_request_delay=args.ai_request_delay,
             use_ollama=args.use_ollama
         )
+        # 计算过去 N 个月的日期范围
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=args.months * 30)
+        actual_start = start_date.strftime('%Y-%m-%d')
+        actual_end = end_date.strftime('%Y-%m-%d')
 
     if not results:
         print("\n[错误] 回测未能生成任何结果")
         sys.exit(1)
+
+    # 默认报告路径：带时间范围和时间戳
+    if args.report is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_name = f"backtest_report_{actual_start.replace('-', '')}_{actual_end.replace('-', '')}_{timestamp}.md"
+        args.report = str(Path(__file__).parent / report_name)
+        print(f"\n[INFO] 报告将保存至：{args.report}")
 
     print_report(results)
 
