@@ -73,6 +73,11 @@ class StockResult:
     first_10pct_day: Optional[int] = None # +10% 发生在第几天
     first_drop2_day: Optional[int] = None # -2% 发生在第几天
     first_drop4_day: Optional[int] = None # -4% 发生在第几天
+    # 新增：行业信息
+    industry: Optional[str] = None        # 所属行业
+    industry_turnover: Optional[float] = None  # 行业成交额（亿元）
+    industry_market_ratio: Optional[float] = None  # 行业占比（%）
+    industry_change_pct: Optional[float] = None  # 行业涨跌幅（%）
 
 
 @dataclass
@@ -599,6 +604,12 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
             name = cand_info.get('name', '')
             strategy = cand_info.get('strategy', '')
 
+            # 获取行业信息（从 recommendation 中）
+            industry = rec.get('industry', None)
+            industry_turnover = rec.get('industry_turnover', None)
+            industry_market_ratio = rec.get('industry_market_ratio', None)
+            industry_change_pct = rec.get('industry_change_pct', None)
+
             # 选股日价格
             pick_price = cand_info.get('close', 0)
             if pick_price is None or pick_price == 0:
@@ -610,7 +621,9 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
                     pick_price=0, target_price=None,
                     change_pct=None, pick_date=pick_date,
                     target_date=target_date, verdict=verdict,
-                    signal_type=signal_type, strategy=strategy, status="no_data"
+                    signal_type=signal_type, strategy=strategy, status="no_data",
+                    industry=industry, industry_turnover=industry_turnover,
+                    industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct
                 ))
                 continue
 
@@ -624,7 +637,9 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
                     change_pct=None, pick_date=pick_date,
                     target_date=target_date, verdict=verdict,
                     signal_type=signal_type, strategy=strategy, status="no_data",
-                    max_gain_pct=None, max_gain_day=None
+                    max_gain_pct=None, max_gain_day=None,
+                    industry=industry, industry_turnover=industry_turnover,
+                    industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct
                 ))
                 continue
 
@@ -647,6 +662,8 @@ def run_historical_backtest(months: int = 12, top_n: int = 10,
                 target_date=target_date, verdict=verdict,
                 signal_type=signal_type, strategy=strategy, status=status,
                 max_gain_pct=max_gain_pct, max_gain_day=max_gain_day,
+                industry=industry, industry_turnover=industry_turnover,
+                industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct,
                 **threshold_data
             ))
 
@@ -774,6 +791,15 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
                          hold_days: int = 30) -> None:
     """保存回测报告为 Markdown 格式"""
 
+    # 导入行业分析器
+    try:
+        from agent.industry_analyzer import IndustryAnalyzer
+        industry_analyzer = IndustryAnalyzer()
+        has_industry = True
+    except Exception as e:
+        print(f"[WARN] 无法加载行业分析器：{e}")
+        has_industry = False
+
     # 收集所有股票数据
     all_stocks: List[StockResult] = []
     for mr in results:
@@ -816,6 +842,32 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
             'wins': month_wins,
             'win_rate': month_win_rate,
             'avg_gain': month_avg
+        })
+
+    # 按行业分组统计
+    industry_groups: Dict[str, List[StockResult]] = {}
+    for s in all_stocks:
+        industry = s.industry or "未知"
+        if industry not in industry_groups:
+            industry_groups[industry] = []
+        industry_groups[industry].append(s)
+
+    # 计算行业表现
+    industry_stats = []
+    for industry, stocks in sorted(industry_groups.items(), key=lambda x: len(x[1]), reverse=True):
+        ind_wins = sum(1 for s in stocks if s.change_pct > 0)
+        ind_loses = sum(1 for s in stocks if s.change_pct < 0)
+        ind_total = len(stocks)
+        ind_avg = sum(s.change_pct for s in stocks) / ind_total if ind_total > 0 else 0
+        ind_win_rate = (ind_wins / ind_total * 100) if ind_total > 0 else 0
+        ind_avg_max_gain = sum(s.max_gain_pct for s in stocks if s.max_gain_pct is not None) / ind_total if ind_total > 0 else 0
+        industry_stats.append({
+            'industry': industry,
+            'count': ind_total,
+            'wins': ind_wins,
+            'win_rate': ind_win_rate,
+            'avg_gain': ind_avg,
+            'avg_max_gain': ind_avg_max_gain,
         })
 
     # 最大涨幅时间分布
@@ -1340,6 +1392,84 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     md_lines.append("---")
     md_lines.append("")
 
+    # 八、行业热度与盈亏关系分析
+    if has_industry and industry_stats:
+        md_lines.append("## 八、行业热度与盈亏关系分析")
+        md_lines.append("")
+        md_lines.append("### 8.1 不同行业的表现")
+        md_lines.append("")
+        md_lines.append("| 行业 | 样本数 | 胜率 | 平均盈亏 | 最大涨幅均值 |")
+        md_lines.append("|------|--------|------|----------|--------------|")
+        for ist in industry_stats[:20]:  # 只显示前 20 个行业
+            md_lines.append(f"| {ist['industry']} | {ist['count']} | {ist['win_rate']:.1f}% | {ist['avg_gain']:+.2f}% | {ist['avg_max_gain']:+.2f}% |")
+        md_lines.append("")
+
+        # 找最佳和最差行业
+        best_industry = max(industry_stats, key=lambda x: x['avg_gain']) if industry_stats else None
+        worst_industry = min(industry_stats, key=lambda x: x['avg_gain']) if industry_stats else None
+        best_win_industry = max(industry_stats, key=lambda x: x['win_rate']) if industry_stats else None
+
+        if best_industry:
+            md_lines.append(f"**最佳收益行业**: \"{best_industry['industry']}\"，平均盈亏 {best_industry['avg_gain']:+.2f}%，胜率 {best_industry['win_rate']:.1f}%")
+        if best_win_industry and best_win_industry != best_industry:
+            md_lines.append(f"**最高胜率行业**: \"{best_win_industry['industry']}\"，胜率 {best_win_industry['win_rate']:.1f}%，平均盈亏 {best_win_industry['avg_gain']:+.2f}%")
+        if worst_industry:
+            md_lines.append(f"**最差收益行业**: \"{worst_industry['industry']}\"，平均盈亏 {worst_industry['avg_gain']:+.2f}%，胜率 {worst_industry['win_rate']:.1f}%")
+        md_lines.append("")
+
+        # 按行业成交额分组统计
+        turnover_groups = [
+            (0, 5, "冷门行业 (<5 亿)"),
+            (5, 15, "温和行业 (5-15 亿)"),
+            (15, 30, "活跃行业 (15-30 亿)"),
+            (30, 100, "热门行业 (>30 亿)"),
+        ]
+        turnover_stats = []
+        for low, high, label in turnover_groups:
+            group = [s for s in all_stocks if s.industry_turnover is not None and low <= s.industry_turnover < high]
+            if group:
+                g_total = len(group)
+                g_wins = sum(1 for s in group if s.change_pct > 0)
+                g_avg = sum(s.change_pct for s in group) / g_total if g_total > 0 else 0
+                g_avg_max = sum(s.max_gain_pct for s in group if s.max_gain_pct is not None) / g_total if g_total > 0 else 0
+                turnover_stats.append({
+                    'label': label,
+                    'count': g_total,
+                    'wins': g_wins,
+                    'win_rate': (g_wins / g_total * 100) if g_total > 0 else 0,
+                    'avg_gain': g_avg,
+                    'avg_max_gain': g_avg_max,
+                })
+
+        if turnover_stats:
+            md_lines.append("### 8.2 行业热度（成交额）与盈亏关系")
+            md_lines.append("")
+            md_lines.append("| 热度分组 | 样本数 | 胜率 | 平均盈亏 | 最大涨幅均值 |")
+            md_lines.append("|----------|--------|------|----------|--------------|")
+            for ts in turnover_stats:
+                md_lines.append(f"| {ts['label']} | {ts['count']} | {ts['win_rate']:.1f}% | {ts['avg_gain']:+.2f}% | {ts['avg_max_gain']:+.2f}% |")
+            md_lines.append("")
+
+            # 计算相关性
+            hot_group = [s for s in all_stocks if s.industry_turnover is not None and s.industry_turnover >= 15]
+            cold_group = [s for s in all_stocks if s.industry_turnover is not None and s.industry_turnover < 15]
+
+            hot_avg = sum(s.change_pct for s in hot_group) / len(hot_group) if hot_group else 0
+            cold_avg = sum(s.change_pct for s in cold_group) / len(cold_group) if cold_group else 0
+            hot_win_rate = sum(1 for s in hot_group if s.change_pct > 0) / len(hot_group) * 100 if hot_group else 0
+            cold_win_rate = sum(1 for s in cold_group if s.change_pct > 0) / len(cold_group) * 100 if cold_group else 0
+
+            md_lines.append("**结论**:")
+            md_lines.append(f"- 热门行业（成交额≥15 亿）平均盈亏：**{hot_avg:+.2f}%**，胜率 **{hot_win_rate:.1f}%**")
+            md_lines.append(f"- 冷门行业（成交额<15 亿）平均盈亏：**{cold_avg:+.2f}%**，胜率 **{cold_win_rate:.1f}%**")
+            if hot_avg > cold_avg:
+                md_lines.append(f"- 热门行业表现优于冷门行业，差额 {hot_avg - cold_avg:+.2f}%")
+            else:
+                md_lines.append(f"- 冷门行业表现优于热门行业，差额 {cold_avg - hot_avg:+.2f}%")
+        md_lines.append("")
+        md_lines.append("---")
+        md_lines.append("")
+
     # 九、阈值触及统计总结
     md_lines.append("## 九、阈值触及统计总结")
     md_lines.append("")
@@ -1641,6 +1771,12 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
             name = cand_info.get('name', '')
             strategy = cand_info.get('strategy', '')
 
+            # 获取行业信息（从 recommendation 中）
+            industry = rec.get('industry', None)
+            industry_turnover = rec.get('industry_turnover', None)
+            industry_market_ratio = rec.get('industry_market_ratio', None)
+            industry_change_pct = rec.get('industry_change_pct', None)
+
             # 选股日价格
             pick_price = cand_info.get('close', 0)
             if pick_price is None or pick_price == 0:
@@ -1653,7 +1789,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
                     change_pct=None, pick_date=pick_date,
                     target_date=target_date, verdict=verdict,
                     signal_type=signal_type, strategy=strategy, status="no_data",
-                    max_gain_pct=None, max_gain_day=None
+                    industry=industry, industry_turnover=industry_turnover,
+                    industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct
                 ))
                 continue
 
@@ -1667,7 +1804,9 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
                     change_pct=None, pick_date=pick_date,
                     target_date=target_date, verdict=verdict,
                     signal_type=signal_type, strategy=strategy, status="no_data",
-                    max_gain_pct=None, max_gain_day=None
+                    max_gain_pct=None, max_gain_day=None,
+                    industry=industry, industry_turnover=industry_turnover,
+                    industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct
                 ))
                 continue
 
@@ -1690,6 +1829,8 @@ def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,
                 target_date=target_date, verdict=verdict,
                 signal_type=signal_type, strategy=strategy, status=status,
                 max_gain_pct=max_gain_pct, max_gain_day=max_gain_day,
+                industry=industry, industry_turnover=industry_turnover,
+                industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct,
                 **threshold_data
             ))
 
@@ -1842,6 +1983,12 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
         name = cand_info.get('name', '')
         strategy = cand_info.get('strategy', '')
 
+        # 获取行业信息（从 recommendation 中）
+        industry = rec.get('industry', None)
+        industry_turnover = rec.get('industry_turnover', None)
+        industry_market_ratio = rec.get('industry_market_ratio', None)
+        industry_change_pct = rec.get('industry_change_pct', None)
+
         # 选股日价格
         pick_price = cand_info.get('close', 0)
         if pick_price is None or pick_price == 0:
@@ -1854,7 +2001,8 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
                 change_pct=None, pick_date=actual_pick_date,
                 target_date=target_date, verdict=verdict,
                 signal_type=signal_type, strategy=strategy, status="no_data",
-                max_gain_pct=None, max_gain_day=None
+                industry=industry, industry_turnover=industry_turnover,
+                industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct
             ))
             continue
 
@@ -1868,7 +2016,9 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
                 change_pct=None, pick_date=actual_pick_date,
                 target_date=target_date, verdict=verdict,
                 signal_type=signal_type, strategy=strategy, status="no_data",
-                max_gain_pct=None, max_gain_day=None
+                max_gain_pct=None, max_gain_day=None,
+                industry=industry, industry_turnover=industry_turnover,
+                industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct
             ))
             continue
 
@@ -1891,6 +2041,8 @@ def run_single_date_backtest(pick_date: str, top_n: int = 10, hold_days: int = 3
             target_date=target_date, verdict=verdict,
             signal_type=signal_type, strategy=strategy, status=status,
             max_gain_pct=max_gain_pct, max_gain_day=max_gain_day,
+            industry=industry, industry_turnover=industry_turnover,
+            industry_market_ratio=industry_market_ratio, industry_change_pct=industry_change_pct,
             **threshold_data
         ))
 
