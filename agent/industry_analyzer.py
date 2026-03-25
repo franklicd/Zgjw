@@ -304,7 +304,7 @@ class IndustryAnalyzer:
         计算行业热度（成交额占比）
 
         优先使用外部数据源（东方财富/腾讯/新浪）获取行业成交额数据
-        如果外部数据源不可用，则使用候选股票的交易额数据计算行业热度
+        只有外部数据源提供真实成交额数据时，才计算行业占比
 
         Args:
             pick_date: 选股日期（YYYY-MM-DD），用于从候选数据中计算
@@ -314,7 +314,7 @@ class IndustryAnalyzer:
                 industry_name: {
                     'turnover': 成交额（亿元）,
                     'change_pct': 涨跌幅，
-                    'market_ratio': 占比（%）,
+                    'market_ratio': 占比（%）,  # 仅当有真实成交额数据时有效
                     'stock_count': 股票数量
                 }
             }
@@ -322,14 +322,27 @@ class IndustryAnalyzer:
         # 尝试获取外部行业数据
         industry_df = self.fetch_industry_turnover()
 
-        # 如果外部数据不可用或没有成交额数据，使用候选股票数据计算
-        if industry_df is None or industry_df.empty or (industry_df is not None and 'turnover' in industry_df.columns and industry_df['turnover'].sum() == 0):
-            print("[INFO] 外部数据源不可用，尝试从候选股票数据计算行业热度...")
-            return self._calculate_industry_heat_from_candidates(pick_date)
+        # 如果外部数据不可用或没有成交额数据，返回空字典
+        if industry_df is None or industry_df.empty:
+            print("[WARN] 外部数据源不可用，无法计算行业热度（成交额占比）")
+            return {}
+
+        # 检查是否有真实成交额数据
+        has_real_turnover = False
+        if 'turnover' in industry_df.columns and industry_df['turnover'].sum() > 0:
+            has_real_turnover = True
+        elif '板块名称' in industry_df.columns:
+            # 尝试用原始列名检查
+            df_tmp = industry_df.rename(columns={'板块名称': 'industry', '成交额': 'turnover'})
+            if 'turnover' in df_tmp.columns and df_tmp['turnover'].sum() > 0:
+                has_real_turnover = True
+
+        if not has_real_turnover:
+            print("[WARN] 外部数据源仅提供行业名称，无真实成交额数据，无法计算行业占比")
+            # 返回仅包含行业名称的数据（占比设为 0）
+            return self._build_industry_heat_no_turnover(industry_df)
 
         # 统一列名映射（支持不同数据源的列名）
-        # 东方财富列名：'板块名称', '成交额', '涨跌幅', '板块股票数量'
-        # 标准化列名：'industry', 'turnover', 'change_pct', 'stock_count'
         df = industry_df.copy()
         if '板块名称' in df.columns:
             df = df.rename(columns={'板块名称': 'industry', '成交额': 'turnover', '涨跌幅': 'change_pct', '板块股票数量': 'stock_count'})
@@ -351,86 +364,23 @@ class IndustryAnalyzer:
 
         return result
 
-    def _calculate_industry_heat_from_candidates(self, pick_date: str | None = None) -> Dict[str, Dict]:
+    def _build_industry_heat_no_turnover(self, industry_df) -> Dict[str, Dict]:
         """
-        从候选股票数据计算行业热度（备用方案）
-
-        通过读取候选股票列表和对应的交易额数据，按行业分组计算：
-        - 每个行业的总交易额
-        - 该行业交易额占所有候选股票总交易额的比例
-
-        Args:
-            pick_date: 选股日期（YYYY-MM-DD）
-
-        Returns:
-            {
-                industry_name: {
-                    'turnover': 成交额（亿元）,
-                    'change_pct': 涨跌幅（暂设为 0）,
-                    'market_ratio': 占比（%）,
-                    'stock_count': 股票数量
-                }
-            }
+        当外部数据源无成交额数据时，仅返回行业名称（占比设为 0）
         """
-        # 从 stocklist 获取行业信息和交易额
-        from pathlib import Path
+        df = industry_df.copy()
+        if '板块名称' in df.columns:
+            df = df.rename(columns={'板块名称': 'industry', '成交额': 'turnover', '涨跌幅': 'change_pct', '板块股票数量': 'stock_count'})
 
-        # 候选股票文件
-        candidates_paths = [
-            Path(__file__).parent.parent / "data" / "candidates" / "candidates_latest.json",
-        ]
-
-        candidates_data = None
-        for cp in candidates_paths:
-            if cp.exists():
-                with open(cp, encoding='utf-8') as f:
-                    candidates_data = json.load(f)
-                break
-
-        if not candidates_data:
-            print("[WARN] 无法加载候选股票数据，行业热度计算失败")
-            return {}
-
-        candidates = candidates_data.get("candidates", [])
-        if not candidates:
-            print("[WARN] 候选股票列表为空")
-            return {}
-
-        # 按行业分组统计交易额
-        industry_turnover = {}
-        industry_stocks = {}
-
-        for stock in candidates:
-            code = stock.get("code", "")
-            turnover_n = stock.get("turnover_n", 0)  # 交易额（元）
-
-            # 获取行业
-            industry = self.get_stock_industry(code)
-            if not industry:
-                industry = "未知"
-
-            # 累加行业交易额
-            if industry not in industry_turnover:
-                industry_turnover[industry] = 0
-                industry_stocks[industry] = []
-            industry_turnover[industry] += turnover_n
-            industry_stocks[industry].append(code)
-
-        # 计算总交易额
-        total_turnover = sum(industry_turnover.values())
-
-        # 构建结果
         result = {}
-        for industry, turnover in industry_turnover.items():
-            turnover_亿元 = turnover / 1e8  # 转为亿元
-            result[industry] = {
-                'turnover': round(turnover_亿元, 2),
-                'change_pct': 0.0,  # 候选数据中无涨跌幅信息
-                'market_ratio': round((turnover / total_turnover * 100) if total_turnover > 0 else 0, 2),
-                'stock_count': len(industry_stocks.get(industry, [])),
+        for _, row in df.iterrows():
+            industry_name = str(row.get('industry', '未知'))
+            result[industry_name] = {
+                'turnover': 0.0,
+                'change_pct': float(row.get('change_pct', 0)) if 'change_pct' in row else 0.0,
+                'market_ratio': 0.0,  # 无真实数据，占比设为 0
+                'stock_count': int(row.get('stock_count', 0)) if 'stock_count' in row else 0,
             }
-
-        print(f"[INFO] 从候选股票计算行业热度：共 {len(result)} 个行业，候选股票总成交额 {total_turnover/1e8:.2f} 亿元")
         return result
 
     def get_industry_rank(self, industry_name: str, industry_heat: Dict) -> Tuple[int, int]:
