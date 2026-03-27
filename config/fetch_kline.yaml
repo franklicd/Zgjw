@@ -3,7 +3,7 @@
 # ============================================================
 
 # 抓取最近几年的数据（默认6年，2019年至今）
-years: 6
+years: 3
 
 # 股票清单 CSV 路径（需含 ts_code 与 symbol 列）
 stocklist: "./pipeline/stocklist.csv"

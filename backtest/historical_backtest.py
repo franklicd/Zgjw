@@ -39,6 +39,21 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict
 
+from backtest.data_loader import (
+    get_all_trading_dates,
+    find_first_trading_day,
+    find_target_day,
+    get_price_on_date,
+    load_kline_data,
+    calc_max_gain,
+    calc_threshold_dates
+)
+
+# 注意：以下本地函数保留，因为它们的逻辑与 data_loader 中的版本不同：
+# - find_first_trading_day_of_month: 特定于月份查找
+# - find_target_trading_day: 特定于回测的目标日查找
+# - calc_max_gain_during_period: 特定于回测的最大涨幅计算
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
@@ -94,25 +109,13 @@ class MonthlyResult:
     win_rate: float
 
 
-def get_all_trading_dates(code: str = "000001") -> List[str]:
-    """
-    获取所有交易日列表（从 K 线数据中提取）
-
-    Returns:
-        按时间排序的交易日列表 ['2023-01-03', '2023-01-04', ...]
-    """
-    kline_file = RAW_DIR / f"{code}.csv"
-    if not kline_file.exists():
-        return []
-
-    dates = []
-    with open(kline_file, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        next(reader)  # skip header
-        for row in reader:
-            dates.append(row[0])
-
-    return sorted(dates)
+# 以下函数使用 backtest.data_loader 模块中的版本：
+# - get_all_trading_dates
+# - find_first_trading_day (注意：本文件中还有一个 find_first_trading_day_of_month 函数，保留)
+# - find_target_day
+# - get_price_on_date
+# - load_kline_data
+# - calc_max_gain
 
 
 def find_first_trading_day_of_month(year: int, month: int, trading_dates: List[str]) -> Optional[str]:
@@ -291,27 +294,10 @@ def load_suggestion(pick_date: str) -> Optional[dict]:
 
 
 def get_price_on_date(code: str, target_date: str, kline_cache: dict) -> Optional[float]:
-    """获取股票在指定日期的收盘价"""
-    if code in kline_cache:
-        kline_data = kline_cache[code]
-    else:
-        kline_data = load_kline_data(code)
-        kline_cache[code] = kline_data
-
-    if not kline_data:
-        return None
-
-    if target_date in kline_data:
-        return kline_data[target_date]['close']
-
-    # 找最近的交易日
-    target_dt = datetime.strptime(target_date, "%Y-%m-%d")
-    for i in range(10):
-        check_date = (target_dt - timedelta(days=i)).strftime("%Y-%m-%d")
-        if check_date in kline_data:
-            return kline_data[check_date]['close']
-
-    return None
+    """获取股票在指定日期的收盘价（使用 data_loader 中的版本）"""
+    # 使用 backtest.data_loader 中的函数
+    from backtest.data_loader import get_price_on_date as _get_price
+    return _get_price(code, target_date, kline_cache)
 
 
 def calc_max_gain_during_period(code: str, pick_date: str, target_date: str,
@@ -459,23 +445,9 @@ def track_threshold_dates(code: str, pick_date: str, target_date: str,
 
 
 def load_kline_data(code: str) -> dict:
-    """加载 K 线数据"""
-    kline_file = RAW_DIR / f"{code}.csv"
-    if not kline_file.exists():
-        return {}
-
-    data = {}
-    with open(kline_file, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            data[row['date']] = {
-                'open': float(row['open']),
-                'close': float(row['close']),
-                'high': float(row['high']),
-                'low': float(row['low']),
-                'volume': float(row['volume'])
-            }
-    return data
+    """加载 K 线数据（使用 data_loader 中的版本）"""
+    from backtest.data_loader import load_kline_data as _load
+    return _load(code)
 
 
 def run_historical_backtest(months: int = 12, top_n: int = 10,

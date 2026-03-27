@@ -17,9 +17,9 @@ prompt_path: agent/prompt.md
 model: qwen3.5-plus
 
 # 相邻 API 调用间隔（秒）
-# 单线程模式：0（无需延迟）
-# 多线程模式：0.5-1（建议值，配合并发数使用）
-request_delay: 0.5
+# 单线程模式：1（默认，避免请求过于密集）
+# 多线程模式：1-2（建议值，配合并发数使用）
+request_delay: 1
 
 # true: 跳过已存在单股 JSON（断点续跑）
 skip_existing: true
@@ -27,15 +27,27 @@ skip_existing: true
 # 推荐最小分数门槛
 suggest_min_score: 4.0
 
+# 是否启用批量处理模式（默认开启以提高效率）
+# - 普通模式: 逐个请求处理
+# - 批量模式: 收集多个请求后批量处理（提高效率）
+batch_mode: true
+
+# 批量处理参数（仅在 batch_mode: true 时生效）
+# 批量大小：每个批量处理多少个请求
+batch_size: 10
+
+# 批量延迟：批量处理的时间间隔（秒）
+batch_delay: 60
+
 # ────────────────────────────────────────────────
 # 并发控制配置
 # ────────────────────────────────────────────────
 
 # 最大并发数
-# 单线程模式：1
+# 单线程模式：1（默认，避免被 API 限流）
 # 多线程模式：根据 API 限流调整，建议 10-20（标准账号）
 # 阿里云 Qwen API 限流：RPM=30000, TPM=5000000, RPS=500
-max_workers: 10
+max_workers: 1
 
 # 是否启用限流保护（推荐开启）
 use_rate_limit: true
@@ -45,3 +57,18 @@ use_rate_limit: true
 # - standard: 标准档（80% 限流额度，适合生产环境）
 # - aggressive: 激进档（90% 限流额度，适合大批量处理）
 rate_limit_profile: standard
+
+# ────────────────────────────────────────────────
+# Ollama 本地模型配置（如使用阿里云 API 可忽略）
+# ────────────────────────────────────────────────
+
+# 是否使用 Ollama 本地模型（true/false）
+# 命令行参数 --use-ollama 会覆盖此配置
+use_ollama: false
+
+# Ollama 服务地址
+ollama_base_url: http://localhost:11434/v1
+
+# Ollama 本地模型名称（需支持视觉输入）
+# 可选：qwen3-vl:8b, qwen2.5-vl:72b, 等
+ollama_model: qwen3-vl:8b

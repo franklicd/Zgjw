@@ -83,11 +83,43 @@ DEFAULT_STOCK_LIST = {
 
 class AKShareFetcher:
     """AKShare 数据抓取器"""
-    
+
     def __init__(self, data_dir="data"):
         self.csv_manager = CSVManager(data_dir)
         self.full_data_dir = Path(data_dir)
         self.stock_names_file = Path(data_dir) / 'stock_names.json'
+        self.update_cache_file = Path(data_dir) / '.update_cache.json'
+
+    def _load_update_cache(self):
+        """加载更新缓存"""
+        if self.update_cache_file.exists():
+            try:
+                with open(self.update_cache_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {}
+
+    def _save_update_cache(self, cache):
+        """保存更新缓存"""
+        try:
+            with open(self.update_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"  保存更新缓存失败：{e}")
+
+    def _get_cached_date(self, stock_code):
+        """获取缓存的最后更新日期"""
+        cache = self._load_update_cache()
+        return cache.get('stocks', {}).get(stock_code)
+
+    def _set_cached_date(self, stock_code, update_date):
+        """缓存股票的最后更新日期"""
+        cache = self._load_update_cache()
+        if 'stocks' not in cache:
+            cache['stocks'] = {}
+        cache['stocks'][stock_code] = update_date
+        self._save_update_cache(cache)
     
     def _load_local_stock_names(self):
         """从本地文件加载股票名称"""
@@ -470,50 +502,134 @@ class AKShareFetcher:
             print(f"  HTTP获取历史数据失败: {e}")
             return None
     
-    def _get_realtime_market_cap(self, stock_code):
+    def _get_realtime_market_cap(self, stock_code, max_retries=3):
         """从实时数据获取总市值"""
-        try:
-            import akshare as ak
-            spot_df = ak.stock_individual_info_em(symbol=stock_code)
-            if not spot_df.empty:
-                total_cap_row = spot_df[spot_df['item'] == '总市值']
-                if not total_cap_row.empty:
-                    total_cap = total_cap_row['value'].values[0]
-                    if isinstance(total_cap, str):
-                        if '亿' in total_cap:
-                            return float(total_cap.replace('亿', '')) * 1e8
-                        else:
-                            return float(total_cap)
-                    return float(total_cap)
-        except Exception as e:
-            print(f"  获取总市值失败: {e}")
+        import time
+
+        for attempt in range(max_retries):
+            try:
+                import akshare as ak
+                spot_df = ak.stock_individual_info_em(symbol=stock_code)
+                if not spot_df.empty:
+                    total_cap_row = spot_df[spot_df['item'] == '总市值']
+                    if not total_cap_row.empty:
+                        total_cap = total_cap_row['value'].values[0]
+                        if isinstance(total_cap, str):
+                            if '亿' in total_cap:
+                                return float(total_cap.replace('亿', '')) * 1e8
+                            else:
+                                return float(total_cap)
+                        return float(total_cap)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    # 指数退避重试
+                    wait_time = (2 ** attempt)
+                    print(f'  获取总市值失败 ({attempt+1}/{max_retries}): {e}，{wait_time}秒后重试')
+                    time.sleep(wait_time)
+                else:
+                    print(f'  获取总市值失败，已重试{max_retries}次：{e}')
         return None
+
+
     
 
     
-    def fetch_stock_history(self, stock_code, years=6):
+    def fetch_stock_history(self, stock_code, years=3, force=False):
         """
-        抓取单只股票历史数据
-        前复权，按日期倒序排列
+        抓取单只股票历史数据（支持增量更新）
+        :param stock_code: 股票代码
+        :param years: 最大保留年数（默认 3 年）
+        :param force: 是否强制全量重新抓取
+        :return: DataFrame 或 None
         """
-        # 方法1: 直接HTTP请求
+        # 检查缓存：今天是否已更新过
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        cached_date = self._get_cached_date(stock_code)
+
+        if not force and cached_date == today_str:
+            print(f"✓ {stock_code} 今日已更新过（缓存：{cached_date}），跳过")
+            # 返回缓存数据
+            existing_df = self.csv_manager.read_stock(stock_code) if self.csv_manager else None
+            if existing_df is not None and not existing_df.empty:
+                return self._trim_to_years(existing_df, years)
+
+        # 尝试从本地缓存读取
+        existing_df = self.csv_manager.read_stock(stock_code) if self.csv_manager else None
+
+        if not force and existing_df is not None and not existing_df.empty:
+            # 本地有数据，执行增量更新
+            result = self._incremental_update(stock_code, existing_df, years)
+            # 保存并更新缓存
+            self.csv_manager.write_stock(stock_code, result)
+            self._set_cached_date(stock_code, today_str)
+            return result
+
+        # 本地无数据或强制重新抓取
+        print(f"{'强制重新抓取' if force else '首次抓取'} {stock_code}...")
+        result = self._full_fetch(stock_code, years)
+        # 保存数据并更新缓存
+        if result is not None and not result.empty:
+            self.csv_manager.write_stock(stock_code, result)
+            self._set_cached_date(stock_code, today_str)
+        return result
+
+    def _incremental_update(self, stock_code, existing_df, years=3):
+        """增量更新：只获取缺失的新数据"""
+        # 快速检查：只读取第一行获取最新日期
+        existing_df = existing_df.copy()
+        existing_df['date'] = pd.to_datetime(existing_df['date'])
+        max_date = existing_df['date'].max()
+        today = pd.Timestamp.today()
+
+        # 计算需要补充的天数
+        days_diff = (today - max_date).days
+
+        if days_diff <= 0:
+            print(f"✓ {stock_code} 数据已最新（最新：{max_date.strftime('%Y-%m-%d')}），无需更新")
+            return self._trim_to_years(existing_df, years)
+
+        print(f"  本地数据最新：{max_date.strftime('%Y-%m-%d')}，需补充 {days_diff} 天数据")
+
+        # 获取增量数据（多取 5 天作为 buffer）
+        fetch_days = min(days_diff + 5, 30)  # 最多取 30 天增量
+
+        # 尝试腾讯接口获取增量
+        new_df = self._fetch_recent_data(stock_code, days=fetch_days)
+
+        if new_df is None or new_df.empty:
+            print(f"  增量获取失败，但本地有 {len(existing_df)} 条历史数据，直接使用")
+            return self._trim_to_years(existing_df, years)
+
+        # 合并数据
+        combined = pd.concat([existing_df, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=['date'], keep='last')
+        combined = combined.sort_values('date', ascending=False)
+
+        # 裁剪到指定年数
+        result = self._trim_to_years(combined, years)
+        print(f"✓ {stock_code} 增量更新完成：原有{len(existing_df)}条 + 新增{len(new_df)}条 → 合并{len(result)}条")
+        return result
+
+    def _full_fetch(self, stock_code, years=3):
+        """全量抓取（首次或强制刷新时使用）"""
+        # 方法 1: 腾讯 HTTP 接口
         try:
             df = self._fetch_stock_history_http(stock_code, years)
             if df is not None and not df.empty:
-                print(f"✓ (HTTP获取 {len(df)}条)")
+                print(f"✓ {stock_code} (HTTP 获取 {len(df)}条)")
                 return df
             else:
-                print(f"  HTTP返回空数据，尝试akshare...")
+                print(f"  HTTP 返回空数据，尝试 akshare...")
         except Exception as e:
-            print(f"  HTTP异常: {e}，尝试akshare...")
-        
-        # 方法2: akshare
+            print(f"  HTTP 异常：{e}，尝试 akshare...")
+
+        # 方法 2: akshare 接口
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=365 * years)
             start_str = start_date.strftime("%Y%m%d")
             end_str = end_date.strftime("%Y%m%d")
-            
+
             df = ak.stock_zh_a_hist(
                 symbol=stock_code,
                 period="daily",
@@ -521,14 +637,14 @@ class AKShareFetcher:
                 end_date=end_str,
                 adjust="qfq"
             )
-            
+
             if df is not None and not df.empty:
                 df = df.rename(columns={
                     '日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low',
                     '收盘': 'close', '成交量': 'volume', '成交额': 'amount', '换手率': 'turnover'
                 })
                 df = df[['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'turnover']]
-                # 从实时数据获取总市值
+                # 获取总市值
                 market_cap = self._get_realtime_market_cap(stock_code)
                 if market_cap:
                     df['market_cap'] = market_cap
@@ -536,14 +652,32 @@ class AKShareFetcher:
                     df['market_cap'] = (hash(stock_code) % 100 + 50) * 1000000000
                 df['date'] = pd.to_datetime(df['date'])
                 df = df.sort_values('date', ascending=False)
+                print(f"✓ {stock_code} (akshare 获取 {len(df)}条)")
                 return df
         except Exception as e:
-            print(f"  akshare获取失败: {e}")
-        
-        # 网络故障，返回空数据，不使用模拟数据
+            print(f"  akshare 获取失败：{e}")
+
         print(f"⚠️ {stock_code} 网络请求全部失败，跳过该股票")
         return None
-    
+
+    def _trim_to_years(self, df, years=3):
+        """裁剪数据到指定年数"""
+        if df.empty:
+            return df
+        df = df.copy()
+        df['date'] = pd.to_datetime(df['date'])
+        cutoff_date = pd.Timestamp.today() - timedelta(days=365 * years)
+        df = df[df['date'] >= cutoff_date]
+        df = df.sort_values('date', ascending=False)
+        return df
+
+    def _fetch_recent_data(self, stock_code, days=10):
+        """获取近期数据（用于增量更新）"""
+        try:
+            return self._fetch_stock_history_http(stock_code, years=0.1)  # 约 36 天
+        except:
+            return None
+
     def fetch_stock_update(self, stock_code, days=10):
         """
         抓取近期数据用于增量更新

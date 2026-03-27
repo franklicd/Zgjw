@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import datetime as dt
+from datetime import timedelta
 import logging
-import random
 import sys
 import time
 import warnings
 from pathlib import Path
 from typing import List, Optional
-import os
-import json
 
 import pandas as pd
 import yaml
 from tqdm import tqdm
 
-# 导入新的数据抓取模块
-from pipeline.akshare_fetcher import AKShareFetcher
+# 导入数据抓取模块（使用 Tushare）
+from pipeline.tushare_fetcher import TushareFetcher
 from pipeline.csv_manager import CSVManager
 
 warnings.filterwarnings("ignore")
@@ -51,47 +49,33 @@ def setup_logging(log_path: Optional[Path] = None) -> None:
 
 logger = logging.getLogger("fetch_from_stocklist")
 
-# --------------------------- 限流/封禁处理配置 --------------------------- #
-COOLDOWN_SECS = 600
-BAN_PATTERNS = (
-    "访问频繁", "请稍后", "超过频率", "频繁访问",
-    "too many requests", "429",
-    "forbidden", "403",
-    "max retries exceeded"
-)
+# --------------------------- 历史 K 线（Tushare Pro 接口，前复权） --------------------------- #
 
-def _looks_like_ip_ban(exc: Exception) -> bool:
-    msg = (str(exc) or "").lower()
-    return any(pat in msg for pat in BAN_PATTERNS)
-
-class RateLimitError(RuntimeError):
-    """表示命中限流/封禁，需要长时间冷却后重试。"""
-    pass
-
-def _cool_sleep(base_seconds: int) -> None:
-    jitter = random.uniform(0.9, 1.2)
-    sleep_s = max(1, int(base_seconds * jitter))
-    logger.warning("疑似被限流/封禁，进入冷却期 %d 秒...", sleep_s)
-    time.sleep(sleep_s)
-
-# --------------------------- 历史K线（AKShare + 腾讯接口，前复权） --------------------------- #
-
-def _get_kline_akshare(code: str, years: int = 6) -> pd.DataFrame:
+def _get_kline_tushare(code: str, years: int = 6) -> pd.DataFrame:
     """
-    通过 AKShare + 腾讯接口获取 A 股日线前复权数据。
-    :param code: 6位股票代码
-    :param years: 获取最近几年的数据，默认6年
+    通过 Tushare Pro 接口获取 A 股日线前复权数据。
+    :param code: 6 位股票代码
+    :param years: 获取最近几年的数据，默认 6 年
     """
     try:
-        # 初始化fetcher（单例模式，避免重复初始化）
-        if not hasattr(_get_kline_akshare, "_fetcher"):
-            _get_kline_akshare._fetcher = AKShareFetcher(data_dir=str(_PROJECT_ROOT / "data"))
-        
-        df = _get_kline_akshare._fetcher.fetch_stock_history(code, years=years)
-        
+        # 初始化 fetcher（单例模式，避免重复初始化）
+        if not hasattr(_get_kline_tushare, "_fetcher"):
+            _get_kline_tushare._fetcher = TushareFetcher(data_dir=str(_PROJECT_ROOT / "data"))
+
+        # 计算日期范围
+        from datetime import timedelta
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365 * years)
+
+        df = _get_kline_tushare._fetcher.fetch_stock_history(
+            code,
+            start_date=start_date.strftime('%Y-%m-%d'),
+            end_date=end_date.strftime('%Y-%m-%d')
+        )
+
         if df is None or df.empty:
             return pd.DataFrame()
-        
+
         # 统一字段格式，和原有系统兼容
         df = df.rename(columns={
             "date": "date",
@@ -101,14 +85,12 @@ def _get_kline_akshare(code: str, years: int = 6) -> pd.DataFrame:
             "low": "low",
             "volume": "volume",
         })[["date", "open", "close", "high", "low", "volume"]].copy()
-        
-        # 按日期正序排列（和原有baostock返回格式一致）
+
+        # 按日期正序排列（和原有 baostock 返回格式一致）
         df = df.sort_values("date").reset_index(drop=True)
-        
+
         return df
     except Exception as e:
-        if _looks_like_ip_ban(e):
-            raise RateLimitError(str(e)) from e
         raise
 
 def validate(df: pd.DataFrame) -> pd.DataFrame:
@@ -147,36 +129,73 @@ def load_codes_from_stocklist(stocklist_csv: Path, exclude_boards: set[str]) -> 
                 stocklist_csv, len(codes), ",".join(sorted(exclude_boards)) or "无")
     return codes
 
-# --------------------------- 单只抓取（全量覆盖保存） --------------------------- #
+# --------------------------- 单只抓取（支持增量更新） --------------------------- #
+
+# 全局目标交易日（由 main() 设置）
+_target_trade_date: Optional[str] = None
+
 def fetch_one(
     code: str,
     years: int,
     out_dir: Path,
+    force: bool = False,
+    target_trade_date: Optional[str] = None,
 ) -> bool:
-    """抓取单只股票并保存。返回 True 表示成功，False 表示三次均失败。"""
-    csv_path = out_dir / f"{code}.csv"
+    """
+    抓取单只股票并保存（支持增量更新）
+    :param code: 股票代码
+    :param years: 最大保留年数（默认 3 年）
+    :param out_dir: 输出目录
+    :param force: 是否强制重新抓取
+    :param target_trade_date: 目标交易日 YYYYMMDD，如果提供则先检查是否已有该日期数据
+    :return: True 表示成功，False 表示失败
+    """
+    # 使用 TushareFetcher 的增量更新功能
+    if not hasattr(fetch_one, "_fetcher"):
+        fetch_one._fetcher = TushareFetcher(data_dir=str(out_dir))
+
+    fetcher = fetch_one._fetcher
+
+    # 如果指定了目标交易日，先检查本地是否已有该日期数据
+    if target_trade_date and not force:
+        existing_df = fetcher.csv_manager.read_stock(code)
+        if existing_df is not None and not existing_df.empty:
+            existing_df['date'] = pd.to_datetime(existing_df['date'])
+            target_date = pd.to_datetime(target_trade_date)
+            if (existing_df['date'] == target_date).any():
+                logger.debug("%s 已包含目标交易日 (%s) 数据，跳过", code, target_trade_date)
+                return True  # 已有数据，跳过
+
+    # 计算日期范围
+    end_date = dt.datetime.now()
+    start_date = end_date - timedelta(days=365 * years)
 
     for attempt in range(1, 4):
         try:
-            new_df = _get_kline_akshare(code, years=years)
-            if new_df.empty:
+            df = fetcher.fetch_stock_history(
+                code,
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d'),
+                force=force
+            )
+            if df is None or df.empty:
                 logger.debug("%s 无数据，生成空表。", code)
-                new_df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-            new_df = validate(new_df)
-            new_df.to_csv(csv_path, index=False)  # 直接覆盖保存
-            time.sleep(random.uniform(0.1, 0.3))  # 降低并发压力（AKShare接口比baostock快，限速更低）
+                df = pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
+                # 写入空表
+                fetcher.csv_manager.write_stock(code, df)
+
+            # Tushare 有调用频率限制，每次请求后稍作等待
+            time.sleep(0.2)
             return True
         except Exception as e:
-            if _looks_like_ip_ban(e):
-                logger.error(f"{code} 第 {attempt} 次抓取疑似被封禁，沉睡 {COOLDOWN_SECS} 秒")
-                _cool_sleep(COOLDOWN_SECS)
-            else:
-                silent_seconds = 3
-                logger.info(f"{code} 第 {attempt} 次抓取失败，{silent_seconds} 秒后重试：{e}")
-                time.sleep(silent_seconds)
+            # Tushare 错误通常是积分不足或调用频率超限
+            logger.error(f"{code} 第 {attempt} 次抓取失败：{e}")
+            if attempt < 3:
+                time.sleep(2)  # 失败后等待再重试
 
     logger.error("%s 三次抓取均失败，已跳过！", code)
     return False
+
 
 
 
@@ -193,7 +212,12 @@ def _load_config(config_path: Path = _CONFIG_PATH) -> dict:
 
 
 # --------------------------- 主入口 --------------------------- #
-def main(log_path: Optional[Path] = None):
+def main(log_path: Optional[Path] = None, force: bool = False):
+    """
+    主函数
+    :param log_path: 日志文件路径
+    :param force: 是否强制重新抓取所有股票
+    """
     # ---------- 读取 YAML 配置 ---------- #
     cfg = _load_config()
 
@@ -204,15 +228,37 @@ def main(log_path: Optional[Path] = None):
     setup_logging(log_path)
     logger.info("日志文件：%s", Path(log_path).resolve())
 
-    # ---------- 日期解析 ---------- #
-    raw_years = cfg.get("years", 6)
+    # ---------- 日期解析（默认改为 3 年） ---------- #
+    raw_years = cfg.get("years", 3)
     try:
         years = int(raw_years)
     except:
-        years = 6
+        years = 3
 
     out_dir = _resolve_cfg_path(cfg.get("out", "./data"))
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- 检查交易日并确定选股日期 ---------- #
+    # 初始化 fetcher 用于交易日判断
+    fetcher = TushareFetcher(data_dir=str(out_dir))
+
+    # 获取系统当前日期
+    today = dt.date.today()
+    today_str = today.strftime('%Y%m%d')
+
+    # 判断今天是否为交易日
+    if fetcher.is_trade_date(today_str):
+        # 今天是交易日，目标日期就是今天
+        target_trade_date = today_str
+        logger.info("今天 (%s) 是交易日，将拉取最新数据", today_str)
+    else:
+        # 今天不是交易日，获取最近一个交易日
+        latest_trade_date = fetcher.get_latest_trade_date()
+        if latest_trade_date is None:
+            logger.error("无法获取最近交易日")
+            sys.exit(1)
+        target_trade_date = latest_trade_date
+        logger.info("今天 (%s) 不是交易日，最近交易日为 %s", today_str, latest_trade_date)
 
     # ---------- 从 stocklist.csv 读取股票池 ---------- #
     stocklist_path = _resolve_cfg_path(cfg.get("stocklist", "./pipeline/stocklist.csv"))
@@ -224,11 +270,11 @@ def main(log_path: Optional[Path] = None):
         sys.exit(1)
 
     logger.info(
-        "开始抓取 %d 支股票 | 数据源:AKShare+腾讯接口(日线,qfq) | 最近:%d年 | 排除:%s",
-        len(codes), years, ",".join(sorted(exclude_boards)) or "无",
+        "开始抓取 %d 支股票 | 数据源:Tushare Pro (日线，qfq) | 最近:%d年 | 排除:%s | 强制刷新:%s",
+        len(codes), years, ",".join(sorted(exclude_boards)) or "无", "是" if force else "否",
     )
 
-    # ---------- 单线程抓取（全量覆盖） ---------- #
+    # ---------- 单线程抓取（支持增量更新） ---------- #
     ok_count   = 0
     fail_count = 0
     with tqdm(
@@ -238,7 +284,8 @@ def main(log_path: Optional[Path] = None):
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
     ) as pbar:
         for code in codes:
-            success = fetch_one(code, years, out_dir)
+            # 传入目标交易日，让 fetch_one 检查是否已有该日期数据
+            success = fetch_one(code, years, out_dir, force=force, target_trade_date=target_trade_date)
             if success:
                 ok_count += 1
             else:

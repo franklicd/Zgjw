@@ -4,7 +4,7 @@ pipeline/select_stock.py
 
 职责：
   - 读取 rules_preselect.yaml 参数
-  - 加载 data/raw/*.csv 日线数据
+  - 加载 data/raw/*.csv 或 *.parquet 日线数据
   - 运行 B1 策略（KDJ + 知行均线）和砖型图策略
   - 返回 List[Candidate]（纯 Python 对象，不写文件）
   - 写文件由 cli.py 调用 io.py 完成
@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import yaml 
+import yaml
 
 try:
     from .schemas import Candidate
@@ -62,7 +62,7 @@ def resolve_preselect_output_dir(
     config_path: Optional[str] = None,
     output_dir: Optional[str] = None,
 ) -> Path:
-    """返回候选输出目录，优先级：CLI参数 > 配置文件 global.output_dir > 默认值。"""
+    """返回候选输出目录，优先级：CLI 参数 > 配置文件 global.output_dir > 默认值。"""
     if output_dir:
         return _resolve_cfg_path(output_dir)
     cfg = load_config(config_path)
@@ -74,38 +74,62 @@ def load_raw_data(
     data_dir: str,
     end_date: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
-    """读取 data_dir 下所有 *.csv，统一处理列名/日期/排序."""
+    """读取 data_dir 下所有 *.csv 和 *.parquet，统一处理列名/日期/排序."""
     if not os.path.isdir(data_dir):
-        raise FileNotFoundError(f"data_dir 不存在: {data_dir}")
+        raise FileNotFoundError(f"data_dir 不存在：{data_dir}")
 
     end_ts = pd.to_datetime(end_date) if end_date else None
     data: Dict[str, pd.DataFrame] = {}
 
-    for fname in os.listdir(data_dir):
-        if not fname.lower().endswith(".csv"):
-            continue
-        code = fname.rsplit(".", 1)[0]
-        fpath = os.path.join(data_dir, fname)
+    # 支持 CSV 和 Parquet 两种格式，递归遍历子目录
+    for root, dirs, files in os.walk(data_dir):
+        for fname in files:
+            if fname.lower().endswith(".csv"):
+                code = fname.rsplit(".", 1)[0]
+                fpath = os.path.join(root, fname)
+            elif fname.lower().endswith(".parquet"):
+                code = fname.rsplit(".", 1)[0]
+                fpath = os.path.join(root, fname)
+            else:
+                continue
 
-        df = pd.read_csv(fpath)
-        df.columns = [c.lower() for c in df.columns]
-        if "date" not in df.columns:
-            logger.warning("跳过 %s：没有 date 列", fname)
-            continue
+            # 跳过分目录过深的文件（如 00/000001.parquet 是允许的，但更深层的跳过）
+            rel_path = os.path.relpath(fpath, data_dir)
+            if rel_path.count(os.sep) > 1:
+                continue
 
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
+            if code in data:
+                # 已经有 Parquet 格式的数据，跳过同名的 CSV
+                if fname.lower().endswith(".csv"):
+                    continue
 
-        if end_ts is not None:
-            df = df[df["date"] <= end_ts].reset_index(drop=True)
+            try:
+                if fname.lower().endswith(".parquet"):
+                    df = pd.read_parquet(fpath)
+                else:
+                    df = pd.read_csv(fpath)
+            except Exception as e:
+                logger.warning("读取 %s 失败：%s", fname, e)
+                continue
 
-        if not df.empty:
-            data[code] = df
+            df.columns = [c.lower() for c in df.columns]
+            if "date" not in df.columns:
+                logger.warning("跳过 %s：没有 date 列", fname)
+                continue
+
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date").reset_index(drop=True)
+
+            if end_ts is not None:
+                df = df[df["date"] <= end_ts].reset_index(drop=True)
+
+            if not df.empty:
+                data[code] = df
 
     if not data:
-        raise ValueError(f"未找到任何 CSV 数据: {data_dir}")
+        raise ValueError(f"未找到任何 CSV 或 Parquet 数据：{data_dir}")
 
-    logger.info("读取股票数量: %d", len(data))
+    logger.info("读取股票数量：%d", len(data))
     return data
 
 
@@ -123,15 +147,53 @@ def _resolve_pick_date(
     prepared: Dict[str, pd.DataFrame],
     pick_date: Optional[str] = None,
 ) -> pd.Timestamp:
-    """确定选股基准日期：None → 最晚可用交易日，否则向前搜索最近日期."""
+    """
+    确定选股基准日期：
+    - pick_date 为 None 时，自动判断今天是否为交易日并返回目标日期
+    - 否则，从数据中查找该日期或之前的最近日期
+    """
+    from datetime import datetime
+
     all_dates = sorted(
         {d for df in prepared.values() if isinstance(df.index, pd.DatetimeIndex) for d in df.index}
     )
     if not all_dates:
         raise ValueError("prepared 数据中没有可用日期。")
-    if pick_date is None:
-        return all_dates[-1]
 
+    if pick_date is None:
+        # 没有指定日期时，判断今天是否为交易日并返回目标日期
+        try:
+            from .tushare_fetcher import TushareFetcher
+            fetcher = TushareFetcher(data_dir="data")
+            today = datetime.now().strftime('%Y%m%d')
+            if fetcher.is_trade_date(today):
+                target_str = today
+            else:
+                latest = fetcher.get_latest_trade_date()
+                target_str = latest if latest else datetime.now().strftime('%Y%m%d')
+
+            target = pd.to_datetime(target_str)
+
+            # 在数据中查找目标日期或之前的最近日期
+            arr = np.array(all_dates, dtype="datetime64[ns]")
+            idx = int(np.searchsorted(arr, target.to_datetime64(), side="right")) - 1
+            if idx >= 0:
+                result_date = all_dates[idx]
+                # 检查返回的日期是否就是目标日期
+                if result_date.date() != target.date():
+                    logger.warning(
+                        f"目标日期 {target.date()} 在数据中不存在，使用数据中的最晚日期 {result_date.date()}。"
+                        f"请先运行 fetch_kline 更新数据。"
+                    )
+                return result_date
+            else:
+                return all_dates[0]
+        except Exception as e:
+            # 如果无法获取交易日历，返回数据中的最晚日期
+            logger.warning(f"获取交易日历失败：{e}，返回数据中最晚日期")
+            return all_dates[-1]
+
+    # 如果数据中没有目标日期，返回之前的最近日期
     target = pd.to_datetime(pick_date)
     arr = np.array(all_dates, dtype="datetime64[ns]")
     idx = int(np.searchsorted(arr, target.to_datetime64(), side="right")) - 1
@@ -204,7 +266,7 @@ def run_b1(
         except Exception as exc:
             logger.debug("B1 skip %s: %s", code, exc)
 
-    logger.info("B1 选出: %d 只", len(candidates))
+    logger.info("B1 选出：%d 只", len(candidates))
     return candidates
 
 
@@ -254,8 +316,8 @@ def run_brick(
     date_str = pick_date.strftime("%Y-%m-%d")
     candidates: List[Candidate] = []
 
-    for code in pool_codes:        
-        df = prepared.get(code)        
+    for code in pool_codes:
+        df = prepared.get(code)
         if df is None or pick_date not in df.index:
             continue
         try:
@@ -275,7 +337,7 @@ def run_brick(
             logger.debug("Brick skip %s: %s", code, exc)
 
     candidates.sort(key=lambda c: c.brick_growth or -999, reverse=True)
-    logger.info("Brick 选出: %d 只", len(candidates))
+    logger.info("Brick 选出：%d 只", len(candidates))
     return candidates
 
 
@@ -299,7 +361,7 @@ def run_preselect(
     config_path : rules_preselect.yaml 路径（None = 默认）
     data_dir    : CSV 目录（None = 读配置）
     end_date    : 数据截断日期（回测用）
-    pick_date   : 选股基准日期（None = 自动最新）
+    pick_date   : 选股基准日期（None = 自动使用系统日期判断交易日）
     """
     cfg = load_config(config_path)
     g = cfg.get("global", {})
@@ -325,8 +387,9 @@ def run_preselect(
     prepared = preparer.prepare(raw_data)
 
     # 4) 确定选股日期
+    # 如果 pick_date 为 None，自动判断今天是否为交易日并返回目标日期
     pick_ts = _resolve_pick_date(prepared, pick_date)
-    logger.info("选股日期: %s", pick_ts.date())
+    logger.info("选股日期：%s", pick_ts.date())
 
     # 5) 构建流动性池
     pool_codes = TopTurnoverPoolBuilder(top_m=top_m).build(prepared).get(pick_ts, [])
@@ -334,7 +397,7 @@ def run_preselect(
         logger.warning("流动性池为空，pick_date=%s", pick_ts.date())
         return pick_ts, []
 
-    logger.info("流动性池: %d 只", len(pool_codes))
+    logger.info("流动性池：%d 只", len(pool_codes))
 
     # 6) 运行各策略
     all_candidates: List[Candidate] = []
@@ -353,5 +416,5 @@ def run_preselect(
             seen.add(c.code)
             deduped.append(c)
 
-    logger.info("初选完成，候选股票: %d 只", len(deduped))
+    logger.info("初选完成，候选股票：%d 只", len(deduped))
     return pick_ts, deduped

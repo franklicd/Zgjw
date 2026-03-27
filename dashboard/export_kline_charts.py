@@ -88,12 +88,19 @@ def _process_single_stock(args: Tuple[str, Path, Path, dict]) -> Tuple[str, bool
     """
     code, raw_dir, out_root, config = args
 
+    # 检查日线图是否已存在
+    day_path = out_root / f"{code}_day.jpg"
+    week_path = out_root / f"{code}_week.jpg"
+
+    # 如果日线图已存在，直接跳过（周线可选生成）
+    if day_path.exists():
+        return code, True, f"已存在，跳过 → {day_path.name}"
+
     df_raw = _load_raw(code, raw_dir)
     if df_raw.empty:
         return code, False, "无日线数据"
 
     # ── 日线图 ────────────────────────────────────────────────────
-    day_path = out_root / f"{code}_day.jpg"
     try:
         fig_day = make_daily_chart(
             df_raw, code,

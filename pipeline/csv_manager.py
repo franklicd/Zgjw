@@ -34,35 +34,46 @@ class CSVManager:
             return subdir / f"{stock_code}.csv"
     
     def read_stock(self, stock_code):
-        """读取股票数据（优先读取Parquet，自动转换旧CSV）"""
-        # 优先尝试Parquet
+        """读取股票数据（优先读取 Parquet，自动兼容旧 CSV 格式）"""
+        # 1. 优先尝试新格式 Parquet（分目录）
         parquet_path = self.get_stock_path(stock_code, use_parquet=True)
         if parquet_path.exists() and parquet_path.stat().st_size > 0:
             try:
                 df = pd.read_parquet(parquet_path)
                 return df
             except Exception as e:
-                print(f"  读取Parquet {stock_code} 失败，尝试CSV: {e}")
-        
-        # 尝试CSV
+                print(f"  读取 Parquet {stock_code} 失败，尝试 CSV: {e}")
+
+        # 2. 尝试新格式 CSV（分目录）
         csv_path = self.get_stock_path(stock_code, use_parquet=False)
-        if not csv_path.exists() or csv_path.stat().st_size == 0:
-            return pd.DataFrame()
-        
-        try:
-            df = pd.read_csv(csv_path, parse_dates=['date'])
-            # 自动转换为Parquet，下次读取更快
-            if self.use_parquet:
-                try:
-                    self.write_stock(stock_code, df)
-                    # 删除旧CSV文件
-                    os.remove(csv_path)
-                except Exception as e:
-                    print(f"  自动转换 {stock_code} 到Parquet失败: {e}")
-            return df
-        except Exception as e:
-            print(f"  读取 {stock_code} 数据失败: {e}")
-            return pd.DataFrame()
+        if csv_path.exists() and csv_path.stat().st_size > 0:
+            try:
+                df = pd.read_csv(csv_path, parse_dates=['date'])
+                if self.use_parquet:
+                    try:
+                        self.write_stock(stock_code, df)
+                    except Exception as e:
+                        print(f"  转换 {stock_code} 到 Parquet 失败：{e}")
+                return df
+            except Exception as e:
+                print(f"  读取 CSV {stock_code} 失败：{e}")
+
+        # 3. 兼容旧格式：平铺在 data_dir 下的 CSV 文件（如 data/raw/000001.csv）
+        legacy_csv_path = self.data_dir / f"{stock_code}.csv"
+        if legacy_csv_path.exists() and legacy_csv_path.stat().st_size > 0:
+            try:
+                df = pd.read_csv(legacy_csv_path, parse_dates=['date'])
+                # 自动转换为新格式
+                if self.use_parquet:
+                    try:
+                        self.write_stock(stock_code, df)
+                    except Exception as e:
+                        print(f"  转换旧格式 {stock_code} 到 Parquet 失败：{e}")
+                return df
+            except Exception as e:
+                print(f"  读取旧格式 {stock_code} 失败：{e}")
+
+        return pd.DataFrame()
     
     def write_stock(self, stock_code, df):
         """写入股票数据（自动去重排序，优先写Parquet）"""
