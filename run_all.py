@@ -74,7 +74,7 @@ def _print_recommendations() -> None:
         return
 
     # 打印表头（含行业信息）
-    header = f"{'排名':>4}  {'代码':>8}  {'总分':>6}  {'行业':>15}  {'信号':>10}  {'研判':>6}  备注"
+    header = f"{'排名':>4}  {'代码':>8}  {'总分':>6}  {'行业':>15}  {'成交额':>8}  {'比例':>6}  {'涨跌%':>6}  {'信号':>10}  {'研判':>6}  备注"
     print(header)
     print("-" * len(header))
     for r in recommendations:
@@ -82,13 +82,19 @@ def _print_recommendations() -> None:
         code        = r.get("code",        "?")
         score       = r.get("total_score", "?")
         industry    = r.get("industry",    "未知")
+        turnover    = r.get("industry_turnover", 0)  # 行业成交额
+        market_ratio = r.get("industry_market_ratio", 0)  # 行业占比
+        change_pct  = r.get("industry_change_pct", 0)  # 行业涨跌幅
         signal_type = r.get("signal_type", "")
         verdict     = r.get("verdict",     "")
         comment     = r.get("comment",     "")
         score_str   = f"{score:.1f}" if isinstance(score, (int, float)) else str(score)
+        turnover_str = f"{turnover:.1f}" if isinstance(turnover, (int, float)) else str(turnover)
+        ratio_str   = f"{market_ratio:.1f}" if isinstance(market_ratio, (int, float)) else str(market_ratio)
+        change_str  = f"{change_pct:.2f}" if isinstance(change_pct, (int, float)) else str(change_pct)
         # 行业名称过长时截断
         industry_str = industry[:12] if len(industry) > 12 else industry
-        print(f"{rank:>4}  {code:>8}  {score_str:>6}  {industry_str:>15}  {signal_type:>10}  {verdict:>6}  {comment}")
+        print(f"{rank:>4}  {code:>8}  {score_str:>6}  {industry_str:>15}  {turnover_str:>8}  {ratio_str:>6}  {change_str:>6}  {signal_type:>10}  {verdict:>6}  {comment}")
 
     # 行业统计
     industry_groups = {}
@@ -147,11 +153,11 @@ def main() -> None:
             [PYTHON, str(ROOT / "dashboard" / "export_kline_charts.py")],
         )
 
-    # ── 步骤 4：Qwen 图表分析 ────────────────────────────────────────
+    # ── 步骤 4：Doubao 图表分析 ────────────────────────────────────────
     if start <= 4:
         _run(
-            "4/4  Qwen 图表分析（qwen_review）",
-            [PYTHON, str(ROOT / "agent" / "qwen_review.py")],
+            "4/4  Doubao 图表分析（doubao_batch_review）",
+            [PYTHON, str(ROOT / "agent" / "doubao_batch_review.py")],
         )
 
     # ── 步骤 5：打印推荐结果 ─────────────────────────────────────────

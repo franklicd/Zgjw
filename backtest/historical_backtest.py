@@ -222,18 +222,22 @@ def run_ai_review(max_workers: int = None, request_delay: float = None, use_olla
         use_ollama: 是否使用 Ollama 本地模型（默认 False，使用阿里云 API）
     """
     print(f"  [步骤 3/3] 运行 AI 评分")
-    model_type = "Ollama 本地模型" if use_ollama else "通义千问 API"
-    print(f"    → 使用 {model_type} 分析股票...（进度见下方）\n")
-
-    cmd = [PYTHON, str(ROOT / "agent" / "qwen_review.py")]
-
-    # 传递并发参数
-    if max_workers is not None:
-        cmd.extend(["--max-workers", str(max_workers)])
-    if request_delay is not None:
-        cmd.extend(["--request-delay", str(request_delay)])
     if use_ollama:
+        model_type = "Ollama 本地模型"
+        print(f"    → 使用 {model_type} 分析股票...（进度见下方）\n")
+        cmd = [PYTHON, str(ROOT / "agent" / "qwen_review.py")]
         cmd.extend(["--use-ollama"])
+    else:
+        # 使用豆包模型进行分析
+        model_type = "豆包 API"
+        print(f"    → 使用 {model_type} (doubao-seed-2.0-pro) 分析股票...（进度见下方）\n")
+        cmd = [PYTHON, str(ROOT / "agent" / "doubao_batch_review.py")]
+
+    # 传递并发参数（如果适用）
+    if max_workers is not None and use_ollama:
+        cmd.extend(["--max-workers", str(max_workers)])
+    if request_delay is not None and use_ollama:
+        cmd.extend(["--request-delay", str(request_delay)])
 
     # 不使用 capture_output，让 AI 分析的进度实时输出到终端
     result = subprocess.run(cmd, cwd=str(ROOT), capture_output=False, text=True)
