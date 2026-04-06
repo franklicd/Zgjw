@@ -27,4 +27,4 @@ suggest_min_score: 4.0
 
 # 批量处理参数
 batch_size: 10        # 每批处理的请求数量
-batch_delay: 60       # 批次间的延迟（秒）
+batch_delay: 0        # 批次间的延迟（秒），0 表示不等待
