@@ -82,9 +82,11 @@ class StockResult:
     max_gain_pct: Optional[float] = None  # 最大涨幅百分比
     max_gain_day: Optional[int] = None  # 最大涨幅发生在第几天
     # 新增：阈值触及日期追踪
+    date_5pct: Optional[str] = None       # 第一次达到 +5% 涨幅的日期
     date_10pct: Optional[str] = None      # 第一次达到 +10% 涨幅的日期
     date_drop2pct: Optional[str] = None   # 第一次达到 -2% 跌幅的日期
     date_drop4pct: Optional[str] = None   # 第一次达到 -4% 跌幅的日期
+    first_5pct_day: Optional[int] = None  # +5% 发生在第几天
     first_10pct_day: Optional[int] = None # +10% 发生在第几天
     first_drop2_day: Optional[int] = None # -2% 发生在第几天
     first_drop4_day: Optional[int] = None # -4% 发生在第几天
@@ -234,9 +236,9 @@ def run_ai_review(max_workers: int = None, request_delay: float = None, use_olla
         cmd = [PYTHON, str(ROOT / "agent" / "doubao_batch_review.py")]
 
     # 传递并发参数（如果适用）
-    if max_workers is not None and use_ollama:
+    if max_workers is not None:
         cmd.extend(["--max-workers", str(max_workers)])
-    if request_delay is not None and use_ollama:
+    if request_delay is not None:
         cmd.extend(["--request-delay", str(request_delay)])
 
     # 不使用 capture_output，让 AI 分析的进度实时输出到终端
@@ -369,7 +371,7 @@ def track_threshold_dates(code: str, pick_date: str, target_date: str,
                           pick_price: float, trading_dates: List[str],
                           kline_cache: dict) -> Dict:
     """
-    追踪选股日后到目标日期间，股票第一次达到 +10%、-2%、-4% 阈值的日期
+    追踪选股日后到目标日期间，股票第一次达到 +5%、+10%、-2%、-4% 阈值的日期
 
     Args:
         code: 股票代码
@@ -380,9 +382,10 @@ def track_threshold_dates(code: str, pick_date: str, target_date: str,
         kline_cache: K 线数据缓存
 
     Returns:
-        dict with date_10pct, date_drop2pct, date_drop4pct, first_10pct_day, first_drop2_day, first_drop4_day
+        dict with date_5pct, date_10pct, date_drop2pct, date_drop4pct, first_5pct_day, first_10pct_day, first_drop2_day, first_drop4_day
     """
     result = {
+        'date_5pct': None, 'first_5pct_day': None,
         'date_10pct': None, 'first_10pct_day': None,
         'date_drop2pct': None, 'first_drop2_day': None,
         'date_drop4pct': None, 'first_drop4_day': None,
@@ -413,6 +416,7 @@ def track_threshold_dates(code: str, pick_date: str, target_date: str,
         end_idx = len(trading_dates) - 1
 
     # 阈值计算
+    target_5pct = pick_price * 1.05   # +5%
     target_10pct = pick_price * 1.10  # +10%
     target_drop2 = pick_price * 0.98  # -2%
     target_drop4 = pick_price * 0.96  # -4%
@@ -425,6 +429,11 @@ def track_threshold_dates(code: str, pick_date: str, target_date: str,
 
         price = kline_data[d]['close']
         day_idx = i - start_idx
+
+        # 检查 +5%
+        if result['date_5pct'] is None and price >= target_5pct:
+            result['date_5pct'] = d
+            result['first_5pct_day'] = day_idx
 
         # 检查 +10%
         if result['date_10pct'] is None and price >= target_10pct:
@@ -441,8 +450,8 @@ def track_threshold_dates(code: str, pick_date: str, target_date: str,
             result['date_drop4pct'] = d
             result['first_drop4_day'] = day_idx
 
-        # 如果三个阈值都已触及，提前退出
-        if all(result[key] is not None for key in ['date_10pct', 'date_drop2pct', 'date_drop4pct']):
+        # 如果四个阈值都已触及，提前退出
+        if all(result[key] is not None for key in ['date_5pct', 'date_10pct', 'date_drop2pct', 'date_drop4pct']):
             break
 
     return result
@@ -762,6 +771,61 @@ def save_report(results: List[MonthlyResult], output_file: Path) -> None:
     print(f"\n报告已保存至：{output_file}")
 
 
+def save_csv_report(results: List[MonthlyResult], output_file: Path) -> None:
+    """保存回测股票数据为 CSV 格式"""
+    import csv
+
+    # CSV 表头
+    headers = [
+        '选股日期', '目标日期', '代码', '名称', '排名', '分数',
+        '选股价', '目标价', '涨跌幅%', '最大涨幅%', '最大涨幅日期',
+        '+5%日期', '+5%天数', '+10%日期', '+10%天数',
+        '-2%日期', '-2%天数', '-4%日期', '-4%天数',
+        '策略', '信号类型', '研判', '状态',
+        '行业', '行业成交额', '行业占比', '行业涨跌幅'
+    ]
+
+    rows = []
+    for mr in results:
+        for s in mr.stocks:
+            rows.append({
+                '选股日期': s.pick_date,
+                '目标日期': s.target_date,
+                '代码': s.code,
+                '名称': s.name,
+                '排名': s.rank,
+                '分数': s.score,
+                '选股价': s.pick_price,
+                '目标价': s.target_price or '',
+                '涨跌幅%': f"{s.change_pct:+.2f}" if s.change_pct is not None else '',
+                '最大涨幅%': f"{s.max_gain_pct:+.2f}" if s.max_gain_pct is not None else '',
+                '最大涨幅日期': s.max_gain_day if s.max_gain_day is not None else '',
+                '+5%日期': s.date_5pct or '',
+                '+5%天数': s.first_5pct_day if s.first_5pct_day is not None else '',
+                '+10%日期': s.date_10pct or '',
+                '+10%天数': s.first_10pct_day if s.first_10pct_day is not None else '',
+                '-2%日期': s.date_drop2pct or '',
+                '-2%天数': s.first_drop2_day if s.first_drop2_day is not None else '',
+                '-4%日期': s.date_drop4pct or '',
+                '-4%天数': s.first_drop4_day if s.first_drop4_day is not None else '',
+                '策略': s.strategy,
+                '信号类型': s.signal_type,
+                '研判': s.verdict,
+                '状态': s.status,
+                '行业': s.industry or '',
+                '行业成交额': s.industry_turnover if s.industry_turnover is not None else '',
+                '行业占比': f"{s.industry_market_ratio:.2f}" if s.industry_market_ratio is not None else '',
+                '行业涨跌幅': f"{s.industry_change_pct:+.2f}" if s.industry_change_pct is not None else '',
+            })
+
+    with open(output_file, 'w', encoding='utf-8-sig', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"CSV 报告已保存至：{output_file}")
+
+
 def save_markdown_report(results: List[MonthlyResult], output_file: Path,
                          start_date: str = None, end_date: str = None,
                          hold_days: int = 30) -> None:
@@ -996,13 +1060,30 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
     # ────────────────────────────────────────────────
 
     # 1. 基础统计：触及各类阈值的股票数量
+    count_5pct = sum(1 for s in all_stocks if s.date_5pct is not None)
     count_10pct = sum(1 for s in all_stocks if s.date_10pct is not None)
     count_drop2 = sum(1 for s in all_stocks if s.date_drop2pct is not None)
     count_drop4 = sum(1 for s in all_stocks if s.date_drop4pct is not None)
 
+    pct_5pct = (count_5pct / total_count * 100) if total_count > 0 else 0
     pct_10pct = (count_10pct / total_count * 100) if total_count > 0 else 0
     pct_drop2 = (count_drop2 / total_count * 100) if total_count > 0 else 0
     pct_drop4 = (count_drop4 / total_count * 100) if total_count > 0 else 0
+
+    # 新增：跌破4%后最大涨幅超过5%和10%的统计
+    # 条件：曾经跌破-4%，且最大涨幅 >= 5%
+    count_drop4_then_5pct = sum(
+        1 for s in all_stocks
+        if s.date_drop4pct is not None and s.max_gain_pct is not None and s.max_gain_pct >= 5
+    )
+    # 条件：曾经跌破-4%，且最大涨幅 >= 10%
+    count_drop4_then_10pct_max = sum(
+        1 for s in all_stocks
+        if s.date_drop4pct is not None and s.max_gain_pct is not None and s.max_gain_pct >= 10
+    )
+
+    pct_drop4_then_5pct = (count_drop4_then_5pct / total_count * 100) if total_count > 0 else 0
+    pct_drop4_then_10pct_max = (count_drop4_then_10pct_max / total_count * 100) if total_count > 0 else 0
 
     # 2. 反转形态统计：先跌后涨
     # 先跌 2% 后涨 10%：date_drop2pct 的日期早于 date_10pct
@@ -1034,6 +1115,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
             'max': max(valid_days),
         }
 
+    day_5pct_stats = calc_day_stats(all_stocks, 'first_5pct_day')
     day_10pct_stats = calc_day_stats(all_stocks, 'first_10pct_day')
     day_drop2_stats = calc_day_stats(all_stocks, 'first_drop2_day')
     day_drop4_stats = calc_day_stats(all_stocks, 'first_drop4_day')
@@ -1049,6 +1131,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
         group = [s for s in all_stocks if low <= s.score < high]
         if group:
             g_total = len(group)
+            g_count_5pct = sum(1 for s in group if s.date_5pct is not None)
             g_count_10pct = sum(1 for s in group if s.date_10pct is not None)
             g_count_drop2 = sum(1 for s in group if s.date_drop2pct is not None)
             g_count_drop4 = sum(1 for s in group if s.date_drop4pct is not None)
@@ -1064,6 +1147,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
             )
             score_threshold_stats.append({
                 'label': label, 'count': g_total,
+                'count_5pct': g_count_5pct, 'pct_5pct': (g_count_5pct / g_total * 100) if g_total > 0 else 0,
                 'count_10pct': g_count_10pct, 'pct_10pct': (g_count_10pct / g_total * 100) if g_total > 0 else 0,
                 'count_drop2': g_count_drop2, 'pct_drop2': (g_count_drop2 / g_total * 100) if g_total > 0 else 0,
                 'count_drop4': g_count_drop4, 'pct_drop4': (g_count_drop4 / g_total * 100) if g_total > 0 else 0,
@@ -1083,6 +1167,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
         group = [s for s in all_stocks if low <= s.rank <= high]
         if group:
             g_total = len(group)
+            g_count_5pct = sum(1 for s in group if s.date_5pct is not None)
             g_count_10pct = sum(1 for s in group if s.date_10pct is not None)
             g_count_drop2 = sum(1 for s in group if s.date_drop2pct is not None)
             g_count_drop4 = sum(1 for s in group if s.date_drop4pct is not None)
@@ -1098,6 +1183,7 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
             )
             rank_threshold_stats.append({
                 'label': label, 'count': g_total,
+                'count_5pct': g_count_5pct, 'pct_5pct': (g_count_5pct / g_total * 100) if g_total > 0 else 0,
                 'count_10pct': g_count_10pct, 'pct_10pct': (g_count_10pct / g_total * 100) if g_total > 0 else 0,
                 'count_drop2': g_count_drop2, 'pct_drop2': (g_count_drop2 / g_total * 100) if g_total > 0 else 0,
                 'count_drop4': g_count_drop4, 'pct_drop4': (g_count_drop4 / g_total * 100) if g_total > 0 else 0,
@@ -1107,13 +1193,13 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
 
     # 生成 Markdown
     md_lines = []
-    md_lines.append("# B1 碗口反弹策略回测分析报告（每日选股版）")
+    md_lines.append(f"# B1 碗口反弹策略回测分析报告（每日选股·持有{hold_days}日版）")
     md_lines.append("")
     md_lines.append(f"**报告生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     md_lines.append(f"**回测时间段**: {actual_start} 至 {actual_end}")
     md_lines.append(f"**选股策略**: B1 完美图形匹配 + 碗口反弹技术指标")
     md_lines.append(f"**选股频率**: 每个交易日")
-    md_lines.append(f"**持有期**: {hold_days}天（自然日）")
+    md_lines.append(f"**持有期**: {hold_days} 天（自然日）")
     md_lines.append(f"**样本数量**: {total_count} 只股票")
     md_lines.append("")
     md_lines.append("---")
@@ -1228,18 +1314,37 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
 
     md_lines.append("### 4.4 按 AI 分数分组的阈值触及率")
     md_lines.append("")
-    md_lines.append("| 分数区间 | 样本数 | +10% 触及率 | -2% 触及率 | -4% 触及率 | 先 -2% 后 +10% | 先 -4% 后 +10% |")
-    md_lines.append("|----------|--------|------------|-----------|-----------|-------------|-------------|")
+    md_lines.append("| 分数区间 | 样本数 | +5% 触及率 | +10% 触及率 | -2% 触及率 | -4% 触及率 | 先 -2% 后 +10% | 先 -4% 后 +10% |")
+    md_lines.append("|----------|--------|----------|------------|-----------|-----------|-------------|-------------|")
     for st in score_threshold_stats:
-        md_lines.append(f"| {st['label']} | {st['count']} | {st['pct_10pct']:.1f}% | {st['pct_drop2']:.1f}% | {st['pct_drop4']:.1f}% | {st['pct_drop2_then_10pct']:.1f}% | {st['pct_drop4_then_10pct']:.1f}% |")
+        md_lines.append(f"| {st['label']} | {st['count']} | {st['pct_5pct']:.1f}% | {st['pct_10pct']:.1f}% | {st['pct_drop2']:.1f}% | {st['pct_drop4']:.1f}% | {st['pct_drop2_then_10pct']:.1f}% | {st['pct_drop4_then_10pct']:.1f}% |")
     md_lines.append("")
 
     md_lines.append("### 4.5 按排名分组的阈值触及率")
     md_lines.append("")
-    md_lines.append("| 排名区间 | 样本数 | +10% 触及率 | -2% 触及率 | -4% 触及率 |")
-    md_lines.append("|----------|--------|------------|-----------|-----------|")
+    md_lines.append("| 排名区间 | 样本数 | +5% 触及率 | +10% 触及率 | -2% 触及率 | -4% 触及率 |")
+    md_lines.append("|----------|--------|----------|------------|-----------|-----------|")
     for rt in rank_threshold_stats:
-        md_lines.append(f"| {rt['label']} | {rt['count']} | {rt['pct_10pct']:.1f}% | {rt['pct_drop2']:.1f}% | {rt['pct_drop4']:.1f}% |")
+        md_lines.append(f"| {rt['label']} | {rt['count']} | {rt['pct_5pct']:.1f}% | {rt['pct_10pct']:.1f}% | {rt['pct_drop2']:.1f}% | {rt['pct_drop4']:.1f}% |")
+    md_lines.append("")
+
+    # 4.6 跌破4%后反转统计（新增）
+    md_lines.append("### 4.6 跌破 4% 后反转统计（重点分析）")
+    md_lines.append("")
+    md_lines.append("| 分析维度 | 数量 | 占比 | 说明 |")
+    md_lines.append("|----------|------|------|------|")
+    md_lines.append(f"| 跌破 -4% 后最大涨幅 ≥+5% | {count_drop4_then_5pct} | {pct_drop4_then_5pct:.1f}% | 曾经跌破 -4%，最终最大涨幅达到 5% |")
+    md_lines.append(f"| 跌破 -4% 后最大涨幅 ≥+10% | {count_drop4_then_10pct_max} | {pct_drop4_then_10pct_max:.1f}% | 曾经跌破 -4%，最终最大涨幅达到 10% |")
+    md_lines.append("")
+    md_lines.append("**结论**: ")
+    if count_drop4 > 0:
+        drop4_stocks = [s for s in all_stocks if s.date_drop4pct is not None]
+        drop4_then_5pct_pct = count_drop4_then_5pct / count_drop4 * 100 if count_drop4 > 0 else 0
+        drop4_then_10pct_pct = count_drop4_then_10pct_max / count_drop4 * 100 if count_drop4 > 0 else 0
+        md_lines.append(f"- 共有 {count_drop4} 只股票曾跌破 -4%")
+        md_lines.append(f"- 其中 **{drop4_then_5pct_pct:.1f}%** 最终最大涨幅达到 +5%")
+        md_lines.append(f"- 其中 **{drop4_then_10pct_pct:.1f}%** 最终最大涨幅达到 +10%")
+        md_lines.append("- 说明：即使短期跌破 -4%，仍有较大机会实现反转")
     md_lines.append("")
 
     md_lines.append("**结论**:")
@@ -1446,22 +1551,162 @@ def save_markdown_report(results: List[MonthlyResult], output_file: Path,
         md_lines.append("---")
         md_lines.append("")
 
-    # 九、阈值触及统计总结
-    md_lines.append("## 九、阈值触及统计总结")
+    # 九、止盈止损触发分析（参考分析报告格式）
+    md_lines.append("## 九、止盈止损触发分析")
     md_lines.append("")
-    md_lines.append("### 9.1 触及率概览")
-    md_lines.append(f"- **+10% 涨幅触及率**: {pct_10pct:.1f}% ({count_10pct} 只股票)")
-    md_lines.append(f"- **-2% 跌幅触及率**: {pct_drop2:.1f}% ({count_drop2} 只股票)")
-    md_lines.append(f"- **-4% 跌幅触及率**: {pct_drop4:.1f}% ({count_drop4} 只股票)")
+    md_lines.append("### 9.1 触发统计")
     md_lines.append("")
-    md_lines.append("### 9.2 反转形态总结")
-    md_lines.append(f"- **先跌 2% 后涨 10%**: {count_drop2_then_10pct} 只 ({pct_drop2_then_10pct:.1f}%)")
-    md_lines.append(f"- **先跌 4% 后涨 10%**: {count_drop4_then_10pct} 只 ({pct_drop4_then_10pct:.1f}%)")
+    md_lines.append("| 触发条件 | 触发数量 | 占总样本比 |")
+    md_lines.append("|----------|----------|------|")
+    md_lines.append(f"| 达到 +5% 涨幅 | {count_5pct} | {pct_5pct:.1f}% |")
+    md_lines.append(f"| 达到 +10% 涨幅 | {count_10pct} | {pct_10pct:.1f}% |")
+    md_lines.append(f"| 达到 -2% 跌幅 | {count_drop2} | {pct_drop2:.1f}% |")
+    md_lines.append(f"| 达到 -4% 跌幅 | {count_drop4} | {pct_drop4:.1f}% |")
     md_lines.append("")
-    md_lines.append("### 9.3 触及时间特征")
-    md_lines.append(f"- +10% 平均触及时间：**{day_10pct_stats['avg']:.1f} 天**")
-    md_lines.append(f"- -2% 平均触及时间：**{day_drop2_stats['avg']:.1f} 天**")
-    md_lines.append(f"- -4% 平均触及时间：**{day_drop4_stats['avg']:.1f} 天**")
+
+    # 条件比率分析
+    # 全身而退率：涨到 +10% 的股票中，从未跌破成本价的比例
+    stocks_hit_10pct = [s for s in all_stocks if s.date_10pct is not None]
+    fully_escaped_count = sum(
+        1 for s in stocks_hit_10pct
+        if s.date_drop2pct is None and s.date_drop4pct is None
+    )
+    fully_escaped_rate = (fully_escaped_count / len(stocks_hit_10pct) * 100) if stocks_hit_10pct else 0
+
+    # 反弹成功率：跌破 -2% 的股票中，最终反弹到 +10% 的比例
+    stocks_drop2 = [s for s in all_stocks if s.date_drop2pct is not None]
+    rebound_success_count = sum(
+        1 for s in stocks_drop2
+        if s.date_10pct is not None
+    )
+    rebound_success_rate = (rebound_success_count / len(stocks_drop2) * 100) if stocks_drop2 else 0
+
+    # 只跌不涨：只跌破 -4% 但没涨到 +10% 的比例
+    only_drop_count = sum(
+        1 for s in all_stocks
+        if s.date_drop4pct is not None and s.date_10pct is None
+    )
+    only_drop_rate = (only_drop_count / total_count * 100) if total_count > 0 else 0
+
+    md_lines.append("**条件比率分析**:")
+    md_lines.append("")
+    md_lines.append("| 指标 | 计算方式 | 数值 |")
+    md_lines.append("|------|----------|------|")
+    md_lines.append(f"| 全身而退率 | 涨到 +10% 的股票中，从未跌破成本价的比例 | {fully_escaped_rate:.1f}% ({fully_escaped_count}/{len(stocks_hit_10pct)}) |")
+    md_lines.append(f"| 反弹成功率 | 跌破 -2% 的股票中，最终反弹到 +10% 的比例 | {rebound_success_rate:.1f}% ({rebound_success_count}/{len(stocks_drop2)}) |")
+    md_lines.append("")
+
+    # 路径分析
+    md_lines.append("**路径分析**（先跌后涨）:")
+    md_lines.append("")
+    md_lines.append("| 路径 | 数量 | 占比 |")
+    md_lines.append("|------|------|------|")
+
+    # 先达到 -2% 后达到 +5%
+    path_drop2_then_5pct = sum(
+        1 for s in all_stocks
+        if s.date_drop2pct is not None and s.date_5pct is not None and s.date_drop2pct < s.date_5pct
+    )
+    md_lines.append(f"| 先达到 -2% 后达到 +5% | {path_drop2_then_5pct} | {path_drop2_then_5pct/total_count*100:.1f}% |")
+
+    # 先达到 -4% 后达到 +5%
+    path_drop4_then_5pct = sum(
+        1 for s in all_stocks
+        if s.date_drop4pct is not None and s.date_5pct is not None and s.date_drop4pct < s.date_5pct
+    )
+    md_lines.append(f"| 先达到 -4% 后达到 +5% | {path_drop4_then_5pct} | {path_drop4_then_5pct/total_count*100:.1f}% |")
+
+    # 先达到 -2% 后达到 +10%
+    md_lines.append(f"| 先达到 -2% 后达到 +10% | {count_drop2_then_10pct} | {pct_drop2_then_10pct:.1f}% |")
+
+    # 先达到 -4% 后达到 +10%
+    md_lines.append(f"| 先达到 -4% 后达到 +10% | {count_drop4_then_10pct} | {pct_drop4_then_10pct:.1f}% |")
+
+    # 直接涨到 +5%（未先触发 -2%）
+    direct_to_5pct = sum(
+        1 for s in all_stocks
+        if s.date_5pct is not None and s.date_drop2pct is None
+    )
+    md_lines.append(f"| 直接涨到 +5%（未先触发 -2%） | {direct_to_5pct} | {direct_to_5pct/total_count*100:.1f}% |")
+
+    # 直接涨到 +10%（未先触发 -2%）
+    direct_to_10pct = sum(
+        1 for s in all_stocks
+        if s.date_10pct is not None and s.date_drop2pct is None
+    )
+    md_lines.append(f"| 直接涨到 +10%（未先触发 -2%） | {direct_to_10pct} | {direct_to_10pct/total_count*100:.1f}% |")
+
+    # 全身而退
+    md_lines.append(f"| 从未跌破成本价直接涨到 +5%（全身而退） | {direct_to_5pct} | {direct_to_5pct/total_count*100:.1f}% |")
+    md_lines.append(f"| 从未跌破成本价直接涨到 +10%（全身而退） | {direct_to_10pct} | {direct_to_10pct/total_count*100:.1f}% |")
+    md_lines.append("")
+
+    # 达到 +10% 天数分析
+    md_lines.append("### 9.2 达到 +10% 天数分析")
+    md_lines.append("")
+    md_lines.append("| 统计项 | 数值 |")
+    md_lines.append("|--------|------|")
+    md_lines.append(f"| 样本数 | {len(stocks_hit_10pct)} 只 |")
+    md_lines.append(f"| 中位数 | **{day_10pct_stats['median']} 天** |")
+    md_lines.append(f"| 平均数 | **{day_10pct_stats['avg']:.1f} 天** |")
+    md_lines.append(f"| 最早 | 第 {day_10pct_stats['min']} 天 |")
+    md_lines.append(f"| 最晚 | 第 {day_10pct_stats['max']} 天 |")
+    md_lines.append("")
+
+    # N日内涨到10%概率
+    md_lines.append("### 9.3 N日内涨到10%概率（决策支持）")
+    md_lines.append("")
+    md_lines.append("| 持有天数 | 累计涨到 10% 概率 | 说明 |")
+    md_lines.append("|----------|-----------------|------|")
+
+    for n_days in [3, 5, 7, 10, 15, 20, 30]:
+        count_within_n = sum(
+            1 for s in all_stocks
+            if s.first_10pct_day is not None and s.first_10pct_day <= n_days
+        )
+        pct_within_n = (count_within_n / total_count * 100) if total_count > 0 else 0
+        md_lines.append(f"| {n_days} 天 | {pct_within_n:.1f}% | {n_days}天内有{pct_within_n:.1f}% 概率涨到 10% |")
+
+    md_lines.append("")
+    md_lines.append("**解读**: ")
+    md_lines.append(f"- **{5-10}天**是关键窗口期，概率从 **{(sum(1 for s in all_stocks if s.first_10pct_day is not None and s.first_10pct_day <= 5) / total_count * 100):.1f}%** 跃升至 **{(sum(1 for s in all_stocks if s.first_10pct_day is not None and s.first_10pct_day <= 10) / total_count * 100):.1f}%**")
+    md_lines.append(f"- **{15-20}天**是关键窗口期，概率从 **{(sum(1 for s in all_stocks if s.first_10pct_day is not None and s.first_10pct_day <= 15) / total_count * 100):.1f}%** 跃升至 **{(sum(1 for s in all_stocks if s.first_10pct_day is not None and s.first_10pct_day <= 20) / total_count * 100):.1f}%**")
+    md_lines.append("")
+
+    # 达到 +5% 天数分析
+    md_lines.append("### 9.4 达到 +5% 天数分析")
+    md_lines.append("")
+    md_lines.append("| 统计项 | 数值 |")
+    md_lines.append("|--------|------|")
+    stocks_hit_5pct = [s for s in all_stocks if s.date_5pct is not None]
+    md_lines.append(f"| 样本数 | {len(stocks_hit_5pct)} 只 |")
+    md_lines.append(f"| 中位数 | **{day_5pct_stats['median']} 天** |")
+    md_lines.append(f"| 平均数 | **{day_5pct_stats['avg']:.1f} 天** |")
+    md_lines.append(f"| 最早 | 第 {day_5pct_stats['min']} 天 |")
+    md_lines.append(f"| 最晚 | 第 {day_5pct_stats['max']} 天 |")
+    md_lines.append("")
+
+    # 风险预警
+    md_lines.append("### 9.5 风险预警：大跌后恢复概率")
+    md_lines.append("")
+    md_lines.append("| 风险信号 | 触发数量 | 最终盈利比例 | 平均最终盈亏 |")
+    md_lines.append("|----------|----------|-------------|-------------|")
+
+    # 跌破 -4%
+    drop4_win = sum(1 for s in all_stocks if s.date_drop4pct is not None and s.change_pct is not None and s.change_pct > 0)
+    drop4_avg = sum(s.change_pct for s in all_stocks if s.date_drop4pct is not None and s.change_pct is not None) / count_drop4 if count_drop4 > 0 else 0
+    drop4_win_rate = drop4_win / count_drop4 * 100 if count_drop4 > 0 else 0
+    md_lines.append(f"| 跌破 -4% | {count_drop4} | {drop4_win_rate:.1f}% | {drop4_avg:+.2f}% |")
+
+    # 未跌破 -4%
+    not_drop4 = total_count - count_drop4
+    not_drop4_win = sum(1 for s in all_stocks if s.date_drop4pct is None and s.change_pct is not None and s.change_pct > 0)
+    not_drop4_avg = sum(s.change_pct for s in all_stocks if s.date_drop4pct is None and s.change_pct is not None) / not_drop4 if not_drop4 > 0 else 0
+    not_drop4_win_rate = not_drop4_win / not_drop4 * 100 if not_drop4 > 0 else 0
+    md_lines.append(f"| 未跌破 -4% | {not_drop4} | {not_drop4_win_rate:.1f}% | {not_drop4_avg:+.2f}% |")
+
+    md_lines.append("")
+    md_lines.append("**解读**: 跌破 -4% 的股票，最终盈利比例显著低于未跌破的股票，说明**风险控制**的重要性")
     md_lines.append("")
     md_lines.append("---")
     md_lines.append("")
@@ -1562,6 +1807,7 @@ def main():
     parser.add_argument('--top-n', type=int, default=10, help='每月选股数量（默认 10）')
     parser.add_argument('--output', type=str, default=None, help='输出 JSON 文件路径')
     parser.add_argument('--report', type=str, help='输出 Markdown 报告文件路径（默认自动生成带时间范围的文件名）')
+    parser.add_argument('--csv', type=str, help='输出 CSV 文件路径（默认自动生成带时间范围的文件名）')
     parser.add_argument('--pick-date', type=str, default=None, help='指定选股日 (YYYY-MM-DD)，用于单日期回测')
     parser.add_argument('--hold-days', type=int, default=30, help='持有天数（默认 30 个交易日）')
     parser.add_argument('--start', type=str, default=None, help='起始日期 (YYYY-MM-DD)，用于日期范围回测')
@@ -1630,6 +1876,16 @@ def main():
         save_markdown_report(results, Path(args.report),
                             start_date=args.start, end_date=args.end,
                             hold_days=args.hold_days)
+
+    # 默认 CSV 路径：带时间范围和时间戳
+    if args.csv is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        csv_name = f"backtest_stocks_{actual_start.replace('-', '')}_{actual_end.replace('-', '')}_{timestamp}.csv"
+        args.csv = str(Path(__file__).parent / csv_name)
+        print(f"\n[INFO] CSV 将保存至：{args.csv}")
+
+    if args.csv:
+        save_csv_report(results, Path(args.csv))
 
 
 def run_date_range_backtest(start_date: str, end_date: str, top_n: int = 10,

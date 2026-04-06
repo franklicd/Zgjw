@@ -187,6 +187,10 @@ class BatchQwenReviewer(BaseReviewer):
         self.batch_requests = []
         self.results_cache = {}
 
+        # 初始化批处理状态跟踪
+        self.batch_status_dir = _ROOT / "data" / "batch_status"
+        self.batch_status_dir.mkdir(parents=True, exist_ok=True)
+
     @staticmethod
     def image_to_base64(path: Path) -> tuple[str, str]:
         """将图片文件转为 base64 字符串及对应 mime_type。"""
@@ -249,16 +253,16 @@ class BatchQwenReviewer(BaseReviewer):
     def submit_batch(self, requests: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         提交批量请求到阿里百炼 Batch API
-        
+
         遵循最佳实践：
         1. 上传 JSONL 文件
         2. 创建批量作业
         3. 异步轮询状态
         4. 下载结果文件
-        
+
         Args:
             requests: 批量请求列表，每个请求包含 custom_id, method, url, body
-            
+
         Returns:
             结果字典，key 为 custom_id（股票代码），value 为分析结果
         """
@@ -269,6 +273,11 @@ class BatchQwenReviewer(BaseReviewer):
         print(f"[INFO] 准备提交包含 {len(requests)} 个请求的批量作业...")
 
         import io
+
+        # 步骤 0：检查挂起的批量作业状态
+        pending_results = self._check_existing_batches_status()
+        if pending_results:
+            print(f"[INFO] 从挂起的批量作业中恢复了 {len(pending_results)} 个结果")
 
         # 步骤 1：创建 JSONL 文件内容
         # 每行一个 JSON 对象，符合 Batch API 输入文件格式
@@ -311,6 +320,15 @@ class BatchQwenReviewer(BaseReviewer):
 
             batch_id = batch_job.id
             print(f"[INFO] ✓ 批量作业已创建，作业 ID: {batch_id}")
+
+            # 保存批量作业信息以便恢复
+            job_info = {
+                "batch_id": batch_id,
+                "request_count": len(requests),
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "created"
+            }
+            self._save_batch_job_info(batch_id, job_info)
 
             # 步骤 4：轮询批量作业状态直到完成
             # 可能的状态：validating → finalizing → processing/in_progress → completed/failed/expired/cancelled
@@ -405,9 +423,9 @@ class BatchQwenReviewer(BaseReviewer):
                             else:
                                 results[custom_id] = {"error": "No response in batch output", "code": custom_id}
                                 error_count += 1
-                    
+
                     print(f"[INFO] 结果解析完成：成功 {success_count} 个，失败 {error_count} 个")
-                    
+
                 except Exception as e:
                     print(f"[❌] 处理批量输出文件时出错：{e}")
                     # 降级处理
@@ -432,7 +450,15 @@ class BatchQwenReviewer(BaseReviewer):
             except:
                 pass
 
-        return results
+            # 如果批量作业成功完成，删除状态文件
+            if batch_id and batch_job and batch_job.status == "completed":
+                self._delete_batch_job_info(batch_id)
+
+        # 合并挂起作业的结果和本次作业的结果
+        all_results = pending_results.copy()
+        all_results.update(results)
+
+        return all_results
 
     def _process_sequentially(self, requests: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -496,15 +522,157 @@ class BatchQwenReviewer(BaseReviewer):
 
         return results
 
+    def _save_batch_job_info(self, batch_id: str, job_info: dict):
+        """
+        保存批量作业信息到文件，以便断网重连后可以继续监控
+        """
+        try:
+            batch_status_file = self.batch_status_dir / f"{batch_id}.json"
+            with open(batch_status_file, 'w', encoding='utf-8') as f:
+                json.dump(job_info, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARN] 保存批量作业信息失败: {e}")
+
+    def _load_batch_job_info(self, batch_id: str) -> dict:
+        """
+        从文件加载批量作业信息
+        """
+        try:
+            batch_status_file = self.batch_status_dir / f"{batch_id}.json"
+            if batch_status_file.exists():
+                with open(batch_status_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[WARN] 加载批量作业信息失败: {e}")
+        return {}
+
+    def _delete_batch_job_info(self, batch_id: str):
+        """
+        删除批量作业信息文件
+        """
+        try:
+            batch_status_file = self.batch_status_dir / f"{batch_id}.json"
+            if batch_status_file.exists():
+                batch_status_file.unlink()
+        except Exception as e:
+            print(f"[WARN] 删除批量作业信息失败: {e}")
+
+    def _check_existing_batches_status(self) -> Dict[str, Any]:
+        """
+        检查已有批量作业的状态
+        """
+        results = {}
+        batch_files = self.batch_status_dir.glob("batch_*.json")
+        active_batch_ids = []
+
+        for batch_file in batch_files:
+            try:
+                with open(batch_file, 'r', encoding='utf-8') as f:
+                    job_info = json.load(f)
+
+                batch_id = job_info.get("batch_id")
+                if batch_id:
+                    active_batch_ids.append(batch_id)
+                    print(f"[INFO] 发现已存在的批量作业: {batch_id} (创建时间: {job_info.get('created_at', '?')})")
+            except Exception as e:
+                print(f"[WARN] 读取批量作业状态文件失败 {batch_file}: {e}")
+
+        if active_batch_ids:
+            print(f"[INFO] 检查 {len(active_batch_ids)} 个已存在的批量作业状态...")
+            for batch_id in active_batch_ids:
+                try:
+                    batch_job = self.client.batches.retrieve(batch_id)
+                    print(f"[INFO] 批量作业 {batch_id} 当前状态: {batch_job.status}")
+
+                    if batch_job.status == "completed":
+                        print(f"[INFO] 批量作业 {batch_id} 已完成，正在下载结果...")
+                        results.update(self._download_batch_results(batch_job))
+                        self._delete_batch_job_info(batch_id)
+                    elif batch_job.status in ["failed", "cancelled", "expired"]:
+                        print(f"[WARN] 批量作业 {batch_id} 状态异常 ({batch_job.status})，删除记录...")
+                        self._delete_batch_job_info(batch_id)
+                    else:
+                        print(f"[INFO] 批量作业 {batch_id} 仍在处理中 ({batch_job.status})，继续监控...")
+
+                except Exception as e:
+                    print(f"[WARN] 查询批量作业 {batch_id} 状态失败: {e}")
+                    # 如果无法连接，仍然保留文件供后续重试
+
+        return results
+
+    def _download_batch_results(self, batch_job) -> Dict[str, Any]:
+        """
+        下载指定批量作业的结果
+        """
+        results = {}
+        if batch_job.output_file_id:
+            try:
+                # 下载输出文件
+                output_file_content = self.client.files.content(batch_job.output_file_id)
+
+                # 解析输出文件内容
+                success_count = 0
+                error_count = 0
+
+                # 检查内容类型并适当地处理
+                content = output_file_content.content
+                if isinstance(content, bytes):
+                    # 如果是字节内容，则解码
+                    content_str = content.decode('utf-8')
+                elif hasattr(output_file_content, 'text') and output_file_content.text:
+                    # 如果有text属性，则使用text
+                    content_str = output_file_content.text
+                else:
+                    # 否则是直接的字符串
+                    content_str = content if isinstance(content, str) else str(content)
+
+                for line in content_str.strip().split('\n'):
+                    if line.strip():
+                        output_item = json.loads(line)
+                        custom_id = output_item.get('custom_id')
+
+                        if 'response' in output_item:
+                            response_body = output_item['response'].get('body', {})
+                            response_text = response_body.get('choices', [{}])[0].get('message', {}).get('content')
+
+                            if response_text:
+                                result = self.extract_json(response_text)
+                                result["code"] = custom_id
+                                results[custom_id] = result
+                                success_count += 1
+                            else:
+                                results[custom_id] = {"error": "Empty response", "code": custom_id}
+                                error_count += 1
+                        else:
+                            results[custom_id] = {"error": "No response in batch output", "code": custom_id}
+                            error_count += 1
+
+                print(f"[INFO] 批量作业 {batch_job.id} 结果解析完成：成功 {success_count} 个，失败 {error_count} 个")
+
+            except Exception as e:
+                print(f"[❌] 处理批量输出文件时出错：{e}")
+        else:
+            print(f"[WARN] 批量作业 {batch_job.id} 没有输出文件")
+        return results
+
     def run(self):
         """
         重构后的 run 方法：
-        1. 先累积所有请求
-        2. 一次性提交批量
-        3. 统一保存结果
-        
+        1. 检查挂起的批量作业
+        2. 分批累积请求（最大10个一批）
+        3. 支持断网重连的批量作业
+        4. 统一保存结果
+
         保证每张图单独获得大模型打分结果
         """
+        # 步骤 0：检查挂起的批量作业状态
+        print("[INFO] 检查挂起的批量作业状态...")
+        all_results_from_pending = self._check_existing_batches_status()
+        if all_results_from_pending:
+            print(f"[INFO] 从挂起的批量作业中恢复了 {len(all_results_from_pending)} 个结果")
+        else:
+            print("[INFO] 没有发现挂起的批量作业")
+
         # 加载候选股票
         candidates_data = self.load_candidates(Path(self.config["candidates"]))
         pick_date: str = candidates_data["pick_date"]
@@ -517,69 +685,111 @@ class BatchQwenReviewer(BaseReviewer):
         all_results: List[dict] = []
         failed_codes: List[str] = []
 
-        # 步骤 1：处理已经存在的缓存文件
+        # 添加已从挂起作业恢复的结果
+        for code, result in all_results_from_pending.items():
+            all_results.append(result)
+
+        # 步骤 1：处理已经存在的缓存文件和已从挂起作业恢复的结果
         cached_count = 0
-        cached_codes = set()
+        processed_codes = set()
+
+        # 添加已从挂起作业恢复的代码
+        for code in all_results_from_pending.keys():
+            processed_codes.add(code)
+
         for candidate in candidates:
             code = candidate["code"]
             out_file = out_dir / f"{code}.json"
-            if self.config.get("skip_existing", False) and out_file.exists():
+            if code in processed_codes:
+                # 已从挂起作业恢复的结果
+                cached_count += 1
+                print(f"[✅] {code} — 从挂起作业恢复，跳过")
+            elif self.config.get("skip_existing", False) and out_file.exists():
                 try:
                     with open(out_file, encoding="utf-8") as f:
                         result = json.load(f)
                     all_results.append(result)
                     cached_count += 1
-                    cached_codes.add(code)
+                    processed_codes.add(code)
                     print(f"[✅] {code} — 已缓存，跳过")
                 except:
                     pass
 
         # 步骤 2：过滤出需要处理的股票
-        to_process = [c for c in candidates if c["code"] not in cached_codes]
-        print(f"[INFO] 待分析股票数：{len(to_process)} (已缓存 {cached_count} 支)")
+        to_process = [c for c in candidates if c["code"] not in processed_codes]
+        print(f"[INFO] 待分析股票数：{len(to_process)} (已处理/缓存 {cached_count} 支)")
 
         if to_process:
-            # 步骤 3：累积所有请求
-            print(f"[INFO] 正在累积 {len(to_process)} 个批量请求...")
-            all_requests = []
-            
-            for candidate in to_process:
-                code = candidate["code"]
-                # 找到对应的图表
-                day_chart = self.find_chart_images(pick_date, code)
-                if day_chart is None:
-                    failed_codes.append(code)
-                    print(f"[WARN] {code} — 未找到图表文件，跳过")
-                    continue
+            # 步骤 3：分批处理请求
+            batch_size = self.config.get("batch_size", 10)
+            batch_count = 0
 
-                # 构建批量请求，custom_id = code 确保唯一标识
-                request = self.build_batch_request(
-                    code=code,
-                    day_chart=day_chart,
-                    prompt=self.prompt,
-                )
-                all_requests.append(request)
+            for i in range(0, len(to_process), batch_size):
+                batch = to_process[i:i + batch_size]
+                batch_count += 1
+                print(f"[INFO] 开始处理第 {batch_count} 批，包含 {len(batch)} 个股票...")
 
-            # 步骤 4：一次性提交批量
-            if all_requests:
-                print(f"[INFO] 提交批量作业，包含 {len(all_requests)} 个请求...")
-                batch_results = self.submit_batch(all_requests)
-                
-                # 步骤 5：统一保存结果
-                # 每个股票结果保存到独立 JSON 文件
-                for code, result in batch_results.items():
-                    out_file = out_dir / f"{code}.json"
-                    with open(out_file, "w", encoding="utf-8") as f:
-                        json.dump(result, f, ensure_ascii=False, indent=2)
+                # 累积当前批次的请求
+                batch_requests = []
 
-                    all_results.append(result)
-                    verdict = result.get("verdict", "?")
-                    score = result.get("total_score", "?")
-                    
-                    if "error" in result:
-                        print(f"[❌] {code} — 失败 | error={result['error']}")
-                    else:
-                        print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
+                for candidate in batch:
+                    code = candidate["code"]
+                    # 找到对应的图表
+                    day_chart = self.find_chart_images(pick_date, code)
+                    if day_chart is None:
+                        failed_codes.append(code)
+                        print(f"[WARN] {code} — 未找到图表文件，跳过")
+                        continue
+
+                    # 构建批量请求，custom_id = code 确保唯一标识
+                    request = self.build_batch_request(
+                        code=code,
+                        day_chart=day_chart,
+                        prompt=self.prompt,
+                    )
+                    batch_requests.append(request)
+
+                # 步骤 4：提交当前批次的批量请求
+                if batch_requests:
+                    print(f"[INFO] 提交第 {batch_count} 批批量作业，包含 {len(batch_requests)} 个请求...")
+                    batch_results = self.submit_batch(batch_requests)
+
+                    # 步骤 5：保存当前批次的结果
+                    # 每个股票结果保存到独立 JSON 文件
+                    print(f"[INFO] 正在保存第 {batch_count} 批的 {len(batch_results)} 个结果...")
+
+                    successful_count = 0
+                    failed_count = 0
+
+                    for code, result in batch_results.items():
+                        # 避免重复处理
+                        if code in processed_codes:
+                            continue
+
+                        out_file = out_dir / f"{code}.json"
+                        with open(out_file, "w", encoding="utf-8") as f:
+                            json.dump(result, f, ensure_ascii=False, indent=2)
+
+                        all_results.append(result)
+                        verdict = result.get("verdict", "?")
+                        score = result.get("total_score", "?")
+
+                        if "error" in result:
+                            print(f"[❌] {code} — 失败 | error={result['error']}")
+                            failed_count += 1
+                        else:
+                            print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
+                            successful_count += 1
+                        processed_codes.add(code)
+
+                    print(f"[INFO] 第 {batch_count} 批处理完成：成功 {successful_count} 支，失败 {failed_count} 支")
+
+                    # 如果不是最后一组，且设置了批量延迟，则暂停一下
+                    if i + batch_size < len(to_process):
+                        delay = self.config.get("batch_delay", 60)
+                        if delay > 0:
+                            print(f"[INFO] 等待 {delay} 秒后处理下一组...")
+                            time.sleep(delay)
 
         print(f"\n[INFO] 评分完成：成功 {len(all_results)} 支，失败/跳过 {len(failed_codes)} 支")
         if failed_codes:

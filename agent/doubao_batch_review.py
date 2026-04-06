@@ -37,6 +37,8 @@ import os
 import sys
 import time
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, List, Dict
 from openai import OpenAI
@@ -67,7 +69,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "suggest_min_score": 4.0,
     # 批量处理参数
     "batch_size": 10,      # 批量处理大小
-    "batch_delay": 60,     # 批量处理间隔（秒）
+    "batch_delay": 0,      # 批量处理间隔（秒），0 表示不等待
 }
 
 def _resolve_cfg_path(path_like: str | Path, base_dir: Path = _ROOT) -> Path:
@@ -99,7 +101,7 @@ class BatchDoubaoReviewer(BaseReviewer):
 
         # 批量处理参数
         self.batch_size = config.get("batch_size", 10)
-        self.batch_delay = config.get("batch_delay", 60)
+        self.batch_delay = config.get("batch_delay", 0)
 
         # 初始化 Doubao 客户端
         api_key = os.environ.get("DOUBAO_API_KEY", "")
@@ -125,9 +127,62 @@ class BatchDoubaoReviewer(BaseReviewer):
         data = path.read_bytes()
         return base64.b64encode(data).decode("utf-8"), mime_type
 
+    def process_single(self, item: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        """处理单个股票（线程安全）"""
+        code = item["code"]
+        day_chart = item["day_chart"]
+        prompt = item["prompt"]
+
+        try:
+            user_text = (
+                f"股票代码：{code}\n\n"
+                "以下是该股票的 **日线图**，请按照系统提示中的框架进行分析，"
+                "并严格按照要求输出 JSON。"
+            )
+
+            b64_data, mime_type = self.image_to_base64(day_chart)
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "【日线图】"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{b64_data}"
+                                },
+                            },
+                            {"type": "text", "text": user_text},
+                        ],
+                    },
+                ],
+                temperature=0.2,
+            )
+
+            response_text = response.choices[0].message.content
+            if response_text is None:
+                raise RuntimeError(f"Doubao 返回空响应（code={code}）")
+
+            result = self.extract_json(response_text)
+            result["code"] = code
+
+            verdict = result.get("verdict", "?")
+            score = result.get("total_score", "?")
+            print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
+
+            return code, result
+
+        except Exception as e:
+            print(f"[❌] {code} — 失败: {str(e)}")
+            return code, {"error": str(e), "code": code}
+
     def process_batch(self, batch_items: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        处理一批股票（最大10个）
+        处理一批股票（支持多线程并发）
 
         Args:
             batch_items: 包含股票信息的列表
@@ -136,58 +191,32 @@ class BatchDoubaoReviewer(BaseReviewer):
             结果字典，key 为股票代码，value 为分析结果
         """
         results = {}
+        max_workers = self.config.get("max_workers", 1)
+        request_delay = self.config.get("request_delay", 0)
 
-        for item in batch_items:
-            code = item["code"]
-            day_chart = item["day_chart"]
-            prompt = item["prompt"]
-
-            try:
-                user_text = (
-                    f"股票代码：{code}\n\n"
-                    "以下是该股票的 **日线图**，请按照系统提示中的框架进行分析，"
-                    "并严格按照要求输出 JSON。"
-                )
-
-                b64_data, mime_type = self.image_to_base64(day_chart)
-
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "【日线图】"},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:{mime_type};base64,{b64_data}"
-                                    },
-                                },
-                                {"type": "text", "text": user_text},
-                            ],
-                        },
-                    ],
-                    temperature=0.2,
-                )
-
-                response_text = response.choices[0].message.content
-                if response_text is None:
-                    raise RuntimeError(f"Doubao 返回空响应（code={code}）")
-
-                result = self.extract_json(response_text)
-                result["code"] = code
+        if max_workers <= 1:
+            # 单线程模式
+            for item in batch_items:
+                code, result = self.process_single(item)
                 results[code] = result
-
-                # 立即打印详细信息
-                verdict = result.get("verdict", "?")
-                score = result.get("total_score", "?")
-                print(f"[✅] {code} — 完成 | verdict={verdict}, score={score}")
-
-            except Exception as e:
-                print(f"[❌] {code} — 失败: {str(e)}")
-                results[code] = {"error": str(e), "code": code}
+                # 请求间隔（在每个请求后延迟，除了最后一个）
+                if request_delay > 0:
+                    time.sleep(request_delay)
+        else:
+            # 多线程模式：每个线程处理一只股票，并发执行
+            print(f"[INFO] 多线程模式启动，最大并发数: {max_workers}")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有任务
+                futures = {executor.submit(self.process_single, item): item for item in batch_items}
+                # 收集结果
+                for future in as_completed(futures):
+                    try:
+                        code, result = future.result()
+                        results[code] = result
+                    except Exception as e:
+                        item = futures[future]
+                        print(f"[❌] {item['code']} — 线程异常: {str(e)}")
+                        results[item['code']] = {"error": str(e), "code": item['code']}
 
         return results
 
@@ -348,6 +377,18 @@ def main():
         default=None,
         help="批量处理间隔秒数（覆盖配置文件设置）",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="最大并发数（覆盖配置文件设置）",
+    )
+    parser.add_argument(
+        "--request-delay",
+        type=float,
+        default=None,
+        help="每个请求间隔秒数（覆盖配置文件设置）",
+    )
     args = parser.parse_args()
 
     config = load_config(Path(args.config))
@@ -357,6 +398,10 @@ def main():
         config["batch_size"] = args.batch_size
     if args.batch_delay is not None:
         config["batch_delay"] = args.batch_delay
+    if args.max_workers is not None:
+        config["max_workers"] = args.max_workers
+    if args.request_delay is not None:
+        config["request_delay"] = args.request_delay
 
     reviewer = BatchDoubaoReviewer(config)
     reviewer.run()

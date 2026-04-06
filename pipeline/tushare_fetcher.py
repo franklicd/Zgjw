@@ -588,8 +588,9 @@ class TushareFetcher:
                 failed += 1
                 failed_list.append(code)
 
-            # 限速：Tushare 有调用次数限制
-            if i % 5 == 0:
+            # 限速：Tushare 限制 200次/分钟，约每秒3-4次
+            # 每3个请求休息0.5秒，每秒约6次，在限制内
+            if i % 3 == 0:
                 time.sleep(0.5)
 
         # 保存失败的股票列表
@@ -671,9 +672,9 @@ class TushareFetcher:
                 print("✗ 失败")
                 failed += 1
 
-            # Tushare 限速
-            if i % 5 == 0:
-                time.sleep(0.3)
+            # 限速：Tushare 限制 200次/分钟
+            if i % 3 == 0:
+                time.sleep(0.5)
 
         print("=" * 60)
         print(f"完成! 更新成功：{updated}, 失败：{failed}")
